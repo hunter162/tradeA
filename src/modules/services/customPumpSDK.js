@@ -536,7 +536,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             transaction.feePayer = creator.publicKey;
 
             // 发送交易
-            const signature = await sendAndConfirmTransaction(
+            const signature = await this.sendTransactionWithLogs(
                 this.connection,
                 transaction,
                 [creator, mint],
@@ -560,7 +560,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                 mint: mint.publicKey,
                 creator: creator.publicKey,
                 tokenAmount: buyAmountSol.toString(),
-                tokenDecimals: 9,
+                tokenDecimals: 6,
                 metadata: tokenMetadata,
                 time: Date.now()
             };
@@ -584,7 +584,72 @@ export class CustomPumpSDK extends PumpFunSDK {
             throw error;
         }
     }
+    async sendTransactionWithLogs(connection, transaction, signers, options) {
+        let lastError = null;
+        const maxRetries = options.maxRetries || 5;
 
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                logger.info(`尝试发送交易 (${attempt + 1}/${maxRetries})`, {
+                    signers: signers.map(s => s.publicKey.toString()),
+                    blockhash: transaction.recentBlockhash,
+                    attempt: attempt + 1
+                });
+
+                const signature = await connection.sendTransaction(transaction, signers, {
+                    skipPreflight: options.skipPreflight,
+                    preflightCommitment: options.preflightCommitment,
+                });
+
+                logger.info(`交易已发送，等待确认... (尝试 ${attempt + 1}/${maxRetries})`, {
+                    signature,
+                    commitment: options.commitment
+                });
+
+                // 等待交易确认
+                const confirmation = await connection.confirmTransaction({
+                    signature,
+                    blockhash: transaction.recentBlockhash,
+                    lastValidBlockHeight: transaction.lastValidBlockHeight
+                }, options.commitment);
+
+                if (confirmation.value.err) {
+                    throw new Error(`Transaction failed: ${confirmation.value.err}`);
+                }
+
+                logger.info('交易确认成功', {
+                    signature,
+                    attempt: attempt + 1,
+                    totalAttempts: maxRetries
+                });
+
+                return signature;
+
+            } catch (error) {
+                lastError = error;
+                logger.warn(`交易尝试失败 (${attempt + 1}/${maxRetries})`, {
+                    error: error.message,
+                    blockhash: transaction.recentBlockhash,
+                    isLastAttempt: attempt === maxRetries - 1
+                });
+
+                if (attempt < maxRetries - 1) {
+                    // 获取新的 blockhash 进行重试
+                    const { blockhash, lastValidBlockHeight } =
+                        await connection.getLatestBlockhash(options.commitment);
+                    transaction.recentBlockhash = blockhash;
+                    transaction.lastValidBlockHeight = lastValidBlockHeight;
+
+                    // 等待一段时间后重试
+                    await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+                } else {
+                    throw lastError;
+                }
+            }
+        }
+
+        throw lastError;
+    }
     // 使用 BN.js 计算滑点
     _calculateSlippageBN(amount, basisPoints) {
         try {
