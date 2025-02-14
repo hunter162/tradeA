@@ -84,29 +84,134 @@ class Application {
 
     setupMiddleware() {
         // CORS 配置
-        this.app.use(cors(config.api.cors));
-        
-        // JSON 解析
-        this.app.use(express.json({ limit: '10mb' }));
-        
-        // 请求日志
+        this.app.use(cors({
+            origin: '*',  // 允许所有来源访问
+            methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+            allowedHeaders: ['Content-Type', 'Authorization'],
+            exposedHeaders: ['Content-Range', 'X-Content-Range'],
+            credentials: true,
+            maxAge: 86400
+        }));
+
+        // JSON 解析配置
+        this.app.use(express.json({
+            limit: '10mb',
+            strict: true,
+            verify: (req, res, buf) => {
+                try {
+                    JSON.parse(buf);
+                } catch(e) {
+                    res.status(400).json({
+                        success: false,
+                        error: 'Invalid JSON'
+                    });
+                    throw new Error('Invalid JSON');
+                }
+            }
+        }));
+
+        // URL 编码解析
+        this.app.use(express.urlencoded({
+            extended: true,
+            limit: '10mb'
+        }));
+
+        // 请求日志中间件
         this.app.use((req, res, next) => {
             const startTime = Date.now();
-            
+            const requestId = crypto.randomUUID();
+
+            // 添加请求ID到响应头
+            res.setHeader('X-Request-ID', requestId);
+
+            // 记录请求开始
+            logger.info(`请求开始 [${requestId}]`, {
+                method: req.method,
+                path: req.path,
+                ip: req.ip,
+                userAgent: req.get('user-agent'),
+                query: req.query,
+                body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? req.body : undefined,
+                headers: {
+                    ...req.headers,
+                    authorization: req.headers.authorization ? '[FILTERED]' : undefined
+                }
+            });
+
             // 响应完成后记录日志
             res.on('finish', () => {
                 const duration = Date.now() - startTime;
-                logger.info(`${req.method} ${req.path}`, {
+                const level = res.statusCode >= 400 ? 'error' : 'info';
+
+                logger[level](`请求完成 [${requestId}]`, {
+                    method: req.method,
+                    path: req.path,
                     status: res.statusCode,
                     duration: `${duration}ms`,
-                    query: req.query,
-                    body: req.method === 'POST' ? req.body : undefined
+                    responseHeaders: {
+                        ...res.getHeaders(),
+                        'set-cookie': res.getHeader('set-cookie') ? '[FILTERED]' : undefined
+                    },
+                    ip: req.ip,
+                    userAgent: req.get('user-agent')
                 });
             });
-            
+
+            // 错误处理
+            res.on('error', (error) => {
+                logger.error(`请求错误 [${requestId}]`, {
+                    method: req.method,
+                    path: req.path,
+                    error: error.message,
+                    stack: error.stack
+                });
+            });
+
             next();
         });
+
+        // 安全相关的响应头
+        this.app.use((req, res, next) => {
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+            res.setHeader('X-Frame-Options', 'DENY');
+            res.setHeader('X-XSS-Protection', '1; mode=block');
+            res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+            res.setHeader('Content-Security-Policy', "default-src 'self'");
+            next();
+        });
+
+        // 请求速率限制
+        const limiter = rateLimit({
+            windowMs: 15 * 60 * 1000, // 15分钟
+            max: 100, // 限制每个IP 15分钟内最多100个请求
+            message: {
+                success: false,
+                error: '请求过于频繁，请稍后再试'
+            },
+            standardHeaders: true,
+            legacyHeaders: false,
+            handler: (req, res) => {
+                logger.warn('速率限制触发', {
+                    ip: req.ip,
+                    path: req.path
+                });
+                res.status(429).json({
+                    success: false,
+                    error: '请求过于频繁，请稍后再试'
+                });
+            }
+        });
+
+        // 对API路由应用速率限制
+        this.app.use('/api/', limiter);
+
+        // 压缩响应
+        this.app.use(compression());
+
+        // 基本安全防护
+        this.app.use(helmet());
     }
+
 
     setupRoutes() {
         // API 路由
@@ -172,14 +277,45 @@ class Application {
     async start() {
         try {
             const port = config.api.port || 3000;
-            
-            this.server = this.app.listen(port, () => {
+
+            this.server = this.app.listen(port, '0.0.0.0', () => {
+                const localAddress = `http://localhost:${port}`;
+                // 获取本机 IP 地址
+                const networkInterfaces = require('os').networkInterfaces();
+                const ipAddresses = [];
+
+                Object.keys(networkInterfaces).forEach((interfaceName) => {
+                    networkInterfaces[interfaceName].forEach((netInterface) => {  // 改为 netInterface
+                        // 跳过内部 IP 和 IPv6
+                        if (netInterface.family === 'IPv4' && !netInterface.internal) {
+                            ipAddresses.push(netInterface.address);
+                        }
+                    });
+                });
+
                 logger.info('=================================');
                 logger.info(`服务器启动成功，监听端口 ${port}`);
-                logger.info(`本地访问: http://localhost:${port}`);
-                logger.info(`健康检查: http://localhost:${port}/health`);
+                logger.info(`本地访问: ${localAddress}`);
+                logger.info('远程访问:');
+                ipAddresses.forEach(ip => {
+                    logger.info(`http://${ip}:${port}`);
+                });
+                logger.info(`健康检查: ${localAddress}/health`);
                 logger.info('=================================');
             });
+
+            // 设置超时时间
+            this.server.timeout = 120000; // 2分钟
+
+            // 增加错误处理
+            this.server.on('error', (error) => {
+                if (error.code === 'EADDRINUSE') {
+                    logger.error(`端口 ${port} 已被占用`);
+                } else {
+                    logger.error('服务器错误:', error);
+                }
+            });
+
         } catch (error) {
             logger.error('应用启动失败:', {
                 error: error.message,
