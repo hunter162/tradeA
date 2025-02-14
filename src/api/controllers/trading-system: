@@ -1,0 +1,36 @@
+trading-system/
+├── src/
+│   ├── api/
+│   │   ├── controllers/
+│   │   │   ├── index.js
+│   │   │   ├── tradeStrategyController.js
+│   │   │   └── healthController.js
+│   │   ├── middleware/
+│   │   │   ├── errorHandler.js
+│   │   │   ├── validator.js
+│   │   │   └── auth.js
+│   │   └── routes/
+│   │       ├── index.js
+│   │       └── tradeStrategy.js
+│   ├── config/
+│   │   ├── index.js
+│   │   ├── database.js
+│   │   └── redis.js
+│   ├── models/
+│   │   ├── index.js
+│   │   ├── tradeStrategy.js
+│   │   ├── tradeTask.js
+│   │   └── tradeExecution.js
+│   ├── services/
+│   │   ├── index.js
+│   │   ├── tradeStrategyService.js
+│   │   ├── tradeExecutorService.js
+│   │   ├── tradeTaskService.js
+│   │   ├── healthCheckService.js
+│   │   └── redisService.js
+│   └── utils/
+│       ├── logger.js
+│       ├── errors.js
+│       └── validator.js
+├── app.js
+└── index.js
