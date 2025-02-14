@@ -1,6 +1,9 @@
 import { logger } from '../../modules/utils/index.js';
+import fs from 'fs/promises';
+import path from 'path';
 import db from '../../modules/db/index.js';
 const { Token, Transaction } = db.models;
+
 
 export class SolanaController {
     constructor(solanaService, tokenTradeService) {
@@ -413,28 +416,56 @@ export class SolanaController {
     }
 
     // 上传代币图片
+    // Updated uploadTokenImage method for SolanaController
     async uploadTokenImage(req, res) {
         try {
+            // 1. 检查文件是否存在
             if (!req.file) {
                 throw new Error('No image file uploaded');
             }
 
-            // 1. 验证文件格式
+            // 2. 验证文件格式
             const supportedFormats = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
             if (!supportedFormats.includes(req.file.mimetype)) {
                 throw new Error('Unsupported file format. Please upload JPG, PNG, GIF or WEBP');
             }
 
-            // 2. 验证文件大小 (5MB)
+            // 3. 验证文件大小 (5MB)
             const maxSize = 5 * 1024 * 1024;
             if (req.file.size > maxSize) {
                 throw new Error('File size too large. Maximum size is 5MB');
             }
 
-            // 3. 上传到 IPFS
-            const ipfsResult = await this.solanaService.uploadToIPFS(req.file.path);
+            // 4. 读取文件内容
+            const fileContent = await fs.readFile(req.file.path);
 
-            // 4. 返回结果
+            // 5. 准备完整的文件对象
+            const fileObject = {
+                content: fileContent,           // 文件内容
+                path: req.file.path,           // 本地路径
+                name: req.file.originalname,    // 原始文件名
+                type: req.file.mimetype,       // MIME类型
+                size: req.file.size,           // 文件大小
+                metadata: {
+                    filename: req.file.filename,
+                    encoding: req.file.encoding,
+                    mimetype: req.file.mimetype,
+                    destination: req.file.destination
+                }
+            };
+
+            // 6. 上传到 IPFS
+            const ipfsResult = await this.solanaService.uploadToIPFS(fileObject);
+
+            // 7. 删除临时文件
+            try {
+                await fs.unlink(req.file.path);
+                logger.info('临时文件已删除:', { path: req.file.path });
+            } catch (unlinkError) {
+                logger.error('删除临时文件失败:', unlinkError);
+            }
+
+            // 8. 返回成功响应
             res.json({
                 success: true,
                 data: {
@@ -445,18 +476,31 @@ export class SolanaController {
                     mimetype: req.file.mimetype
                 }
             });
+
         } catch (error) {
+            // 9. 错误处理
             logger.error('上传代币图片失败:', {
                 error: error.message,
                 file: req.file
             });
+
+            // 10. 删除临时文件
+            if (req.file?.path) {
+                try {
+                    await fs.unlink(req.file.path);
+                    logger.info('临时文件已删除:', { path: req.file.path });
+                } catch (unlinkError) {
+                    logger.error('删除临时文件失败:', unlinkError);
+                }
+            }
+
+            // 11. 返回错误响应
             res.status(400).json({
                 success: false,
                 error: error.message
             });
         }
     }
-
     // 创建代币元数据
     async createTokenMetadata(req, res) {
         try {

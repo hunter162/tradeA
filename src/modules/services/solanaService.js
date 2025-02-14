@@ -1504,34 +1504,51 @@ export class SolanaService {
         }
     }
 
-    async uploadToIPFS(file) {
+    async uploadToIPFS(fileObject) {
+        // 1. 验证文件对象
+        if (!fileObject || !fileObject.content || !fileObject.name || !fileObject.type) {
+            throw new Error('Invalid file object: missing required properties');
+        }
+
         try {
-            if (!this.pinataService) {
-                throw new Error('PinataService not initialized');
+            // 2. 准备上传数据
+            const pinataOptions = {
+                pinataMetadata: {
+                    name: fileObject.name,
+                    keyvalues: {
+                        type: fileObject.type,
+                        size: fileObject.size,
+                        uploadTime: new Date().toISOString()
+                    }
+                }
+            };
+
+            // 3. 调用 Pinata API
+            const formData = new FormData();
+            formData.append('file', fileObject.content, {
+                filename: fileObject.name,
+                contentType: fileObject.type
+            });
+            formData.append('pinataOptions', JSON.stringify(pinataOptions));
+
+            const response = await this.pinataService.pinFileToIPFS(formData);
+
+            // 4. 验证响应
+            if (!response || !response.IpfsHash) {
+                throw new Error('Failed to get IPFS hash from upload service');
             }
 
-            logger.info('开始上传文件到 IPFS:', {
-                filename: file.originalname,
-                mimetype: file.mimetype,
-                size: file.size,
-                pinataConfigured: !!this.pinataService
-            });
+            return {
+                IpfsHash: response.IpfsHash,
+                PinSize: response.PinSize,
+                Timestamp: response.Timestamp
+            };
 
-            // 上传到 IPFS
-            const result = await this.pinataService.uploadFile(file);
-
-            // 删除本地临时文件
-            fs.unlink(file.path, (err) => {
-                if (err) logger.error('删除临时文件失败:', err);
-            });
-
-            return result;
         } catch (error) {
             logger.error('上传到 IPFS 失败:', {
                 error: error.message,
-                stack: error.stack,
-                file: file?.originalname,
-                pinataService: !!this.pinataService
+                pinataService: true,
+                filename: fileObject.name
             });
             throw error;
         }

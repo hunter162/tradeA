@@ -9,7 +9,7 @@ import { body, validationResult } from 'express-validator';
 import { SolanaServiceError, handleError, asyncHandler } from '../../modules/utils/errors.js';
 import { solanaValidators } from '../middleware/solanaValidator.js';
 import { ErrorCodes } from '../../constants/errorCodes.js';
-
+import fs from 'fs';
 const router = Router();
 
 // 使用中间件来获取服务实例
@@ -19,20 +19,34 @@ const getController = (req, res, next) => {
     next();
 };
 
-// 配置文件上传
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        cb(null, 'uploads/') // 确保这个目录存在
+        // 确保上传目录存在
+        const uploadDir = 'uploads/';
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
     },
     filename: function (req, file, cb) {
-        cb(null, `${Date.now()}-${file.originalname}`)
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
     }
 });
 
-const upload = multer({ 
+const upload = multer({
     storage: storage,
     limits: {
-        fileSize: 5 * 1024 * 1024 // 限制 5MB
+        fileSize: 5 * 1024 * 1024, // 5MB
+        files: 1
+    },
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (allowedTypes.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Unsupported file type. Please upload JPG, PNG, GIF or WEBP'));
+        }
     }
 });
 
@@ -102,11 +116,51 @@ router.get('/transactions/:signature/confirm', async (req, res) => {
 });
 
 // 上传文件到本地并同步到 IPFS
-router.post('/upload', 
+// 上传文件到本地并同步到 IPFS
+router.post('/upload',
     getController,
-    upload.single('file'), 
+    (req, res, next) => {
+        upload.single('file')(req, res, (err) => {
+            if (err) {
+                logger.error('文件上传错误:', {
+                    error: err.message,
+                    code: err instanceof multer.MulterError ? err.code : 'UNKNOWN'
+                });
+                return res.status(400).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+            if (!req.file) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'No file uploaded'
+                });
+            }
+            next();
+        });
+    },
     async (req, res) => {
-        await req.solanaController.uploadFile(req, res);
+        try {
+            await req.solanaController.uploadFile(req, res);
+        } catch (error) {
+            // 清理临时文件
+            if (req.file?.path) {
+                fs.unlink(req.file.path, (unlinkError) => {
+                    if (unlinkError) {
+                        logger.error('删除临时文件失败:', unlinkError);
+                    }
+                });
+            }
+            logger.error('处理上传失败:', {
+                error: error.message,
+                file: req.file
+            });
+            res.status(500).json({
+                success: false,
+                error: error.message
+            });
+        }
     }
 );
 
@@ -218,11 +272,52 @@ router.get('/tokens/:mint', async (req, res) => {
 });
 
 // 上传代币图片
-router.post('/tokens/upload-image', 
+router.post('/tokens/upload-image',
     getController,
-    upload.single('image'),
-    async (req, res) => {
-        await req.solanaController.uploadTokenImage(req, res);
+    (req, res, next) => {
+        upload.single('image')(req, res, async (err) => {
+            if (err instanceof multer.MulterError) {
+                logger.error('Multer 错误:', {
+                    code: err.code,
+                    message: err.message
+                });
+                return res.status(400).json({
+                    success: false,
+                    error: err.message
+                });
+            } else if (err) {
+                logger.error('文件上传错误:', { message: err.message });
+                return res.status(400).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+            try {
+                await req.solanaController.uploadTokenImage(req, res);
+            } catch (error) {
+                logger.error('处理上传失败:', {
+                    error: error.message,
+                    file: req.file
+                });
+
+                // 清理临时文件
+                if (req.file?.path && fs.existsSync(req.file.path)) {
+                    fs.unlink(req.file.path, (unlinkError) => {
+                        if (unlinkError) {
+                            logger.error('删除临时文件失败:', unlinkError);
+                        }
+                    });
+                }
+
+                if (!res.headersSent) {
+                    res.status(500).json({
+                        success: false,
+                        error: error.message
+                    });
+                }
+            }
+        });
     }
 );
 
