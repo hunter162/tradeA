@@ -441,45 +441,252 @@ export class CustomPumpSDK extends PumpFunSDK {
     }
 
 // createAndBuy 方法
-    async createAndBuy(creator, mint, metadata, buyAmountSol, slippageOptions = { slippageBasisPoints: 100 }, priorityFees) {
+    // In CustomPumpSDK class (customPumpSDK.js)
+
+    async createAndBuy(creator, mint, metadata, buyAmountSol, options = {}) {
         try {
-            // Validate input parameters
+            // Validate inputs
             if (!creator?.publicKey) throw new Error('Invalid creator wallet');
             if (!mint?.publicKey) throw new Error('Invalid mint keypair');
             if (!metadata?.name || !metadata?.symbol) throw new Error('Invalid metadata');
 
-            // Convert SOL amount to lamports
-            const buyAmountLamports = BigInt(Math.floor(Number(buyAmountSol) * LAMPORTS_PER_SOL));
-
-            logger.info('开始创建和购买代币:', {
+            logger.info('Starting token creation and purchase:', {
                 creator: creator.publicKey.toString(),
                 mint: mint.publicKey.toString(),
-                buyAmount: `${buyAmountSol} SOL`,
-                slippage: `${Number(slippageOptions.slippageBasisPoints || 100) / 100}%`
+                metadata: {
+                    name: metadata.name,
+                    symbol: metadata.symbol
+                },
+                buyAmount: buyAmountSol.toString()
             });
 
-            // Get global account
-            const globalAccount = await this.getGlobalAccount();
+            // 1. Create token metadata
+            const tokenMetadata = await this.createTokenMetadata(metadata);
 
-            // Calculate buy amount with slippage
-            const initialBuyPrice = globalAccount.getInitialBuyPrice(buyAmountLamports);
-            const buyAmountWithSlippage = await this.calculateWithSlippageBuy(
-                initialBuyPrice,
-                slippageOptions
+            // 2. Get initial buy amount
+            const buyAmountLamports = BigInt(buyAmountSol.toString());
+
+            // 3. Get slippage settings
+            const slippageBasisPoints = BigInt(options.slippageBasisPoints || 100);
+
+            // 4. Build and send transaction
+            const transaction = new SolanaTransaction();
+
+            // 4.1 Get create instructions
+            const createIx = await this.getCreateInstructions(
+                creator.publicKey,
+                metadata.name,
+                metadata.symbol,
+                tokenMetadata.metadataUri,
+                mint
+            );
+            transaction.add(createIx);
+
+            // 4.2 Get buy instructions if amount > 0
+            if (buyAmountLamports > 0n) {
+                const globalAccount = await this.getGlobalAccount();
+                const buyAmount = globalAccount.getInitialBuyPrice(buyAmountLamports);
+                const buyAmountWithSlippage = this.calculateWithSlippageBuy(
+                    buyAmount,
+                    slippageBasisPoints
+                );
+
+                const buyIx = await this.getBuyInstructions(
+                    creator.publicKey,
+                    mint.publicKey,
+                    globalAccount.feeRecipient,
+                    buyAmount,
+                    buyAmountWithSlippage
+                );
+                transaction.add(buyIx);
+            }
+
+            // 5. Send transaction
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('confirmed');
+
+            transaction.recentBlockhash = blockhash;
+            transaction.lastValidBlockHeight = lastValidBlockHeight;
+            transaction.feePayer = creator.publicKey;
+
+            const signature = await this.sendTransactionWithLogs(
+                this.connection,
+                transaction,
+                [creator, mint],
+                {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                    commitment: 'confirmed',
+                    maxRetries: 3
+                }
             );
 
-            // Rest of the createAndBuy implementation...
-            // ... (keeping existing code)
-        } catch (error) {
-            logger.error('创建代币失败:', {
-                error: error.message,
-                creator: creator?.publicKey?.toString(),
-                mint: mint?.publicKey?.toString(),
+            // 6. Get token amount after creation
+            const tokenAccount = await this.findAssociatedTokenAddress(
+                creator.publicKey,
+                mint.publicKey
+            );
+
+            let tokenAmount = '0';
+            try {
+                const balance = await this.connection.getTokenAccountBalance(tokenAccount);
+                tokenAmount = balance.value.amount;
+            } catch (error) {
+                logger.warn('Failed to get token balance:', error);
+            }
+
+            // 7. Return standardized response
+            const result = {
+                success: true,
+                signature,
+                mint: mint.publicKey.toString(),
+                creator: creator.publicKey.toString(),
+                tokenAmount,
+                solAmount: buyAmountSol.toString(),
                 metadata: {
-                    name: metadata?.name,
-                    symbol: metadata?.symbol
+                    name: metadata.name,
+                    symbol: metadata.symbol,
+                    uri: tokenMetadata.metadataUri
                 },
-                stack: error.stack
+                timestamp: Date.now()
+            };
+
+            logger.info('Token creation and purchase successful:', {
+                signature,
+                mint: result.mint,
+                tokenAmount
+            });
+
+            return result;
+
+        } catch (error) {
+            logger.error('Token creation and purchase failed:', {
+                error: error.message,
+                stack: error.stack,
+                creator: creator?.publicKey?.toString(),
+                mint: mint?.publicKey?.toString()
+            });
+            throw error;
+        }
+    }
+
+// In SolanaService class (solanaService.js)
+
+    async createAndBuy({ groupType, accountNumber, metadata, solAmount, options = {} }) {
+        try {
+            logger.info('Starting token creation process:', {
+                groupType,
+                accountNumber,
+                metadata: {
+                    name: metadata.name,
+                    symbol: metadata.symbol
+                },
+                solAmount
+            });
+
+            // 1. Get wallet
+            const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
+            if (!wallet) {
+                throw new Error(`Wallet not found: ${groupType}-${accountNumber}`);
+            }
+
+            // 2. Generate mint keypair
+            const mint = Keypair.generate();
+            logger.info('Generated mint keypair:', {
+                mint: mint.publicKey.toString()
+            });
+
+            // 3. Convert SOL amount to lamports
+            const buyAmountSol = BigInt(Math.floor(solAmount * LAMPORTS_PER_SOL));
+
+            // 4. Execute creation and purchase
+            const result = await this.sdk.createAndBuy(
+                wallet,
+                mint,
+                metadata,
+                buyAmountSol,
+                {
+                    ...options,
+                    slippageBasisPoints: BigInt(options.slippageBasisPoints || 100)
+                }
+            );
+
+            if (!result || !result.signature || !result.mint) {
+                logger.error('Invalid SDK response:', { result });
+                throw new Error('Invalid response from createAndBuy operation');
+            }
+
+            // 5. Save token data
+            const tokenData = {
+                mint: result.mint,
+                owner: wallet.publicKey.toString(),
+                name: metadata.name,
+                symbol: metadata.symbol,
+                description: metadata.description || '',
+                image: metadata.image || '',
+                external_url: metadata.external_url || '',
+                creatorPublicKey: wallet.publicKey.toString(),
+                groupType,
+                accountNumber,
+                metadata: metadata,
+                uri: result.metadata?.uri || '',
+                status: 'active'
+            };
+
+            await db.models.Token.create(tokenData);
+
+            // 6. Record transaction
+            await db.models.Transaction.create({
+                signature: result.signature,
+                mint: result.mint,
+                owner: wallet.publicKey.toString(),
+                type: 'create_and_buy',
+                amount: solAmount.toString(),
+                status: 'success',
+                raw: {
+                    ...result,
+                    metadata,
+                    timestamp: new Date().toISOString()
+                }
+            });
+
+            // 7. Setup token tracking
+            await this.setupTokenTracking(
+                wallet.publicKey.toString(),
+                result.mint,
+                result.tokenAmount || '0'
+            );
+
+            logger.info('Token creation successful:', {
+                mint: result.mint,
+                signature: result.signature,
+                solAmount: solAmount.toString()
+            });
+
+            return {
+                success: true,
+                signature: result.signature,
+                mint: result.mint,
+                owner: wallet.publicKey.toString(),
+                solAmount: solAmount.toString(),
+                tokenAmount: result.tokenAmount,
+                metadata: {
+                    name: metadata.name,
+                    symbol: metadata.symbol,
+                    uri: result.metadata?.uri || ''
+                }
+            };
+
+        } catch (error) {
+            logger.error('Token creation failed:', {
+                error: error.message,
+                stack: error.stack,
+                groupType,
+                accountNumber,
+                metadata: {
+                    name: metadata.name,
+                    symbol: metadata.symbol
+                }
             });
             throw error;
         }
