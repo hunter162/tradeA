@@ -114,29 +114,43 @@ class TokenLaunchCalculator {
         return newSol.sub(this.currentSolReserves);
     }
 }
+class CustomWallet {
+    constructor(keypair) {
+        this.keypair = keypair;
+    }
 
+    get publicKey() {
+        return this.keypair.publicKey;
+    }
+
+    async signTransaction(tx) {
+        tx.partialSign(this.keypair);
+        return tx;
+    }
+
+    async signAllTransactions(txs) {
+        txs.forEach(tx => tx.partialSign(this.keypair));
+        return txs;
+    }
+}
 // 不继承 PumpSDK，而是作为组合使用
 export class CustomPumpSDK extends PumpFunSDK {
-    constructor(provider) {
-        if (!provider) {
-            const wallet = new Keypair();
-            const connection = new Connection('https://api.mainnet-beta.solana.com');
-            provider = new AnchorProvider(
-                connection,
-                {
-                    publicKey: wallet.publicKey,
-                    signTransaction: async (tx) => {
-                        tx.partialSign(wallet);
-                        return tx;
-                    },
-                    signAllTransactions: async (txs) => {
-                        txs.forEach(tx => tx.partialSign(wallet));
-                        return txs;
-                    }
-                },
-                { commitment: 'confirmed' }
-            );
-        }
+    constructor(options = {}) {
+        // Create default wallet if not provided
+        const wallet = options.wallet || new CustomWallet(Keypair.generate());
+
+        // Create connection if not provided
+        const connection = options.connection || new Connection(
+            options.rpcEndpoint || 'https://api.mainnet-beta.solana.com',
+            'confirmed'
+        );
+
+        // Create AnchorProvider
+        const provider = new AnchorProvider(
+            connection,
+            wallet,
+            options.providerOptions || { commitment: 'confirmed' }
+        );
         super(provider);
         this.provider = provider;  //
         this.solanaService = null;
