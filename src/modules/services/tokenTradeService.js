@@ -1,6 +1,7 @@
 import { logger } from '../utils/index.js';
 import db from '../db/index.js';
 import { PublicKey } from '@solana/web3.js';
+import {CustomPumpSDK} from "./customPumpSDK.js";
 
 export class TokenTradeService {
     constructor(solanaService, redisService) {
@@ -191,6 +192,7 @@ export class TokenTradeService {
         }
     }
 
+    // In TokenTradeService class (tokenTradeService.js)
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         try {
             // 1. 获取钱包
@@ -199,13 +201,29 @@ export class TokenTradeService {
                 throw new Error('Wallet not found');
             }
 
-            // 2. 获取代币信息
+            // 2. 获取代币信息并执行验证
             const tokenInfo = await this.getTokenInfo(tokenAddress);
             if (!tokenInfo) {
                 throw new Error(`Token ${tokenAddress} not found`);
             }
 
-            // 3. 计算卖出数量
+            // 3. 从 base64 私钥创建 Keypair
+            const keypair = Keypair.fromSecretKey(
+                Buffer.from(wallet.privateKey, 'base64')
+            );
+
+            // 4. 创建对应的 Provider
+            const provider = new AnchorProvider(
+                this.solanaService.connection,
+                new Wallet(keypair),
+                {
+                    commitment: 'confirmed',
+                    preflightCommitment: 'confirmed',
+                    skipPreflight: false
+                }
+            );
+
+            // 5. 计算卖出数量
             const tokenBalance = await this.solanaService.getTokenBalance(wallet.publicKey, tokenAddress);
             const sellAmount = BigInt(Math.floor(Number(tokenBalance) * (percentage / 100)));
 
@@ -213,21 +231,56 @@ export class TokenTradeService {
                 throw new Error('Invalid sell amount');
             }
 
-            // 4. 调用 SDK 的 sell 方法
-            const result = await this.solanaService.sdk.sell(
-                wallet, // 直接传入钱包对象
+            logger.info('开始卖出代币:', {
+                wallet: wallet.publicKey,
+                token: tokenAddress,
+                amount: sellAmount.toString(),
+                percentage: `${percentage}%`
+            });
+
+            // 6. 创建 CustomPumpSDK 实例
+            const sdk = new CustomPumpSDK(provider);
+            sdk.setSolanaService(this.solanaService);
+
+            // 7. 准备优先费用选项
+            const priorityFees = options.usePriorityFee ? {
+                microLamports: options.microLamports, // 使用 microLamports 替代 tipAmountSol
+                type: options.priorityType || 'default'
+            } : undefined;
+
+            // 8. 执行卖出操作
+            const result = await sdk.sell(
+                keypair,
                 new PublicKey(tokenAddress),
                 sellAmount,
                 BigInt(options.slippage || 100),
-                options.priorityFeeSol ? {
-                    tipAmountSol: options.priorityFeeSol
-                } : undefined,
+                priorityFees,
                 {
                     usePriorityFee: options.usePriorityFee,
                     priorityType: options.priorityType,
                     deadline: options.deadline || 60
                 }
             );
+
+            // 9. 保存交易记录
+            await this.saveTradeTransaction({
+                signature: result.signature,
+                mint: tokenAddress,
+                owner: wallet.publicKey,
+                type: 'sell',
+                amount: sellAmount.toString(),
+                metadata: {
+                    percentage,
+                    tokenInfo,
+                    options
+                }
+            });
+
+            logger.info('代币卖出成功:', {
+                signature: result.signature,
+                token: tokenAddress,
+                amount: sellAmount.toString()
+            });
 
             return result;
 
@@ -240,7 +293,8 @@ export class TokenTradeService {
                     tokenAddress,
                     percentage,
                     options
-                }
+                },
+                stack: error.stack
             });
             throw error;
         }

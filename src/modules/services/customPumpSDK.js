@@ -1574,34 +1574,25 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 slippage: `${Number(slippage) / 100}%`
             });
 
-            // 2. Create a new provider with the seller's wallet
-            const newProvider = new AnchorProvider(
-                this.connection,
-                new Wallet(seller),
-                {
-                    commitment: 'confirmed',
-                    preflightCommitment: 'confirmed',
-                    skipPreflight: false
-                }
-            );
+            // 2. Ensure we have a valid provider
+            if (!this.provider) {
+                throw new Error('Provider is required for sell operation');
+            }
 
-            // 3. Create a new SDK instance with the new provider
-            const sdkWithWallet = new CustomPumpSDK(newProvider);
-
-            // 4. Use withRetry to wrap the main operation
+            // 3. Use withRetry to wrap the main operation
             return await this.withRetry(async () => {
-                // 5. Get sell instructions with the new SDK instance
-                const sellIx = await sdkWithWallet.getSellInstructions(
+                // 4. Get sell instructions
+                const sellIx = await this.getSellInstructions(
                     seller.publicKey,
                     mintPubkey,
                     tokenAmount,
                     slippage
                 );
 
-                // 6. Create transaction
+                // 5. Create transaction
                 const sellTx = new Transaction();
 
-                // 7. Add priority fees if needed
+                // 6. Add priority fees if needed
                 if (options.usePriorityFee) {
                     const jitoService = new JitoService(this.connection);
                     const priorityTx = await jitoService.addPriorityFee(sellTx, {
@@ -1618,10 +1609,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     );
                 }
 
-                // 8. Add sell instruction
+                // 7. Add sell instruction
                 sellTx.add(sellIx);
 
-                // 9. Get latest blockhash
+                // 8. Get latest blockhash
                 const { blockhash, lastValidBlockHeight } =
                     await this.connection.getLatestBlockhash('confirmed');
 
@@ -1629,14 +1620,14 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 sellTx.lastValidBlockHeight = lastValidBlockHeight;
                 sellTx.feePayer = seller.publicKey;
 
-                // 10. Simulate transaction
+                // 9. Simulate transaction
                 const simulation = await this.connection.simulateTransaction(sellTx, [seller]);
 
                 if (simulation.value.err) {
                     throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
                 }
 
-                // 11. Send and confirm transaction
+                // 10. Send and confirm transaction
                 const signature = await sendAndConfirmTransaction(
                     this.connection,
                     sellTx,
@@ -1648,7 +1639,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     }
                 );
 
-                // 12. Return result
+                // 11. Return result
                 return {
                     signature,
                     txId: signature,
