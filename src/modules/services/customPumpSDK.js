@@ -8,6 +8,7 @@ import {logger} from '../utils/index.js';
 import {PinataService} from './pinataService.js';
 import {config} from '../../config/index.js';
 import fs from 'fs/promises';
+import CustomAnchorWallet from './CustomAnchorWallet.js';
 import {
     Transaction as SolanaTransaction,
     SystemProgram,
@@ -137,7 +138,7 @@ class CustomWallet {
 export class CustomPumpSDK extends PumpFunSDK {
     constructor(options = {}) {
         // Create default wallet if not provided
-        const wallet = options.wallet || new CustomWallet(Keypair.generate());
+        const customWallet = new CustomAnchorWallet(options.keypair || Keypair.generate());
 
         // Create connection if not provided
         const connection = options.connection || new Connection(
@@ -148,8 +149,12 @@ export class CustomPumpSDK extends PumpFunSDK {
         // Create AnchorProvider
         const provider = new AnchorProvider(
             connection,
-            wallet,
-            options.providerOptions || { commitment: 'confirmed' }
+            customWallet,
+            {
+                commitment: options.commitment || 'confirmed',
+                preflightCommitment: options.preflightCommitment || 'confirmed',
+                skipPreflight: options.skipPreflight || false
+            }
         );
         super(provider);
         this.provider = provider;  //
@@ -197,7 +202,22 @@ export class CustomPumpSDK extends PumpFunSDK {
         if (!provider) {
             throw new Error('Provider is required to create program');
         }
-        return new Program(IDL, this.PROGRAM_ID, provider);
+
+        try {
+            // Create Program instance with explicit provider
+            return new Program(
+                IDL,
+                this.PROGRAM_ID,
+                provider
+            );
+        } catch (error) {
+            logger.error('Failed to create program:', {
+                error: error.message,
+                provider: provider?.wallet?.publicKey?.toString(),
+                programId: this.PROGRAM_ID
+            });
+            throw error;
+        }
     }
     setSolanaService(solanaService) {
         this.solanaService = solanaService;
