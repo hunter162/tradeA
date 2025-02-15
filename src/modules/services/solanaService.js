@@ -1,6 +1,6 @@
 import pkg from '@project-serum/anchor';
 const { BN } = pkg;
-
+import { EventEmitter } from 'events';
 import {
     Connection,
     Keypair,
@@ -596,7 +596,7 @@ export class SolanaService {
         }
     }
     // 订阅代币余额变化
-    async subscribeToTokenBalance(publicKey, tokenAddress) {
+    async subscribeToTokenBalance(publicKey, tokenAddress, onBalanceChange) {
         try {
             if (!this.wsManager) {
                 logger.warn('WebSocket 管理器未初始化');
@@ -622,7 +622,6 @@ export class SolanaService {
                                     CACHE_KEYS.TOKEN_BALANCE(publicKey.toString(), tokenAddress),
                                     JSON.stringify({
                                         amount: newBalance.toString(),
-                                        // 其他字段需要从代币元数据获取
                                     }),
                                     { EX: 60 }
                                 );
@@ -631,15 +630,17 @@ export class SolanaService {
                             }
                         }
 
-                        // 发送余额变化事件
-                        this.emit('tokenBalanceChange', {
-                            publicKey: publicKey.toString(),
-                            tokenAddress,
-                            tokenAccount: tokenAccount.toString(),
-                            oldBalance: null, // 可以从缓存获取旧余额
-                            newBalance: newBalance.toString(),
-                            timestamp: Date.now()
-                        });
+                        // 使用回调函数通知余额变化
+                        if (typeof onBalanceChange === 'function') {
+                            onBalanceChange({
+                                publicKey: publicKey.toString(),
+                                tokenAddress,
+                                tokenAccount: tokenAccount.toString(),
+                                oldBalance: null,
+                                newBalance: newBalance.toString(),
+                                timestamp: Date.now()
+                            });
+                        }
                     } catch (error) {
                         logger.error('处理代币余额更新失败:', error);
                     }
@@ -2783,7 +2784,15 @@ export class SolanaService {
             const subscriptionId = await this.wsManager.subscribeToAccount(
                 new PublicKey(mintAddress),
                 async (accountInfo) => {
-                    await this.handleTokenBalanceChange(ownerAddress, mintAddress, accountInfo);
+                    await this.handleTokenBalanceChange(
+                        ownerAddress,
+                        mintAddress,
+                        accountInfo,
+                        (balanceInfo) => {
+                            logger.info('Token balance updated:', balanceInfo);
+                            // 这里可以添加其他处理逻辑
+                        }
+                    );
                 }
             );
 
@@ -2803,7 +2812,8 @@ export class SolanaService {
             return false;
         }
     }
-    async handleTokenBalanceChange(ownerAddress, mintAddress, accountInfo) {
+
+    async handleTokenBalanceChange(ownerAddress, mintAddress, accountInfo, onBalanceChange) {
         try {
             // 1. 解析新余额
             const newBalance = accountInfo.lamports.toString();
@@ -2822,13 +2832,15 @@ export class SolanaService {
                 lastUpdate: new Date()
             });
 
-            // 4. 触发事件通知
-            this.emit('tokenBalanceChange', {
-                owner: ownerAddress,
-                mint: mintAddress,
-                newBalance,
-                timestamp: Date.now()
-            });
+            // 4. 使用回调函数通知变化
+            if (typeof onBalanceChange === 'function') {
+                onBalanceChange({
+                    owner: ownerAddress,
+                    mint: mintAddress,
+                    newBalance,
+                    timestamp: Date.now()
+                });
+            }
 
             logger.debug('代币余额更新:', {
                 owner: ownerAddress,
