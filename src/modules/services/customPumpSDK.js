@@ -572,7 +572,7 @@ export class CustomPumpSDK extends PumpFunSDK {
 
                 // 计算带滑点的金额
                 const slippageBasisPoints = this._ensureBigInt(options.slippageBasisPoints || 100);
-                const buyAmountWithSlippage = this.calculateWithSlippageBuy(
+                const buyAmountWithSlippage =await this.calculateWithSlippageBuy(
                     initialBuyPriceBigInt,
                     slippageBasisPoints
                 );
@@ -582,7 +582,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                     mint.publicKey,
                     globalAccount.feeRecipient,
                     initialBuyPriceBigInt,
-                    buyAmountWithSlippage
+                     buyAmountWithSlippage
                 );
                 transaction.add(buyIx);
 
