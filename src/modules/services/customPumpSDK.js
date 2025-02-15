@@ -141,16 +141,13 @@ export class CustomPumpSDK extends PumpFunSDK {
             options.rpcEndpoint || 'https://api.mainnet-beta.solana.com',
             options.commitment || 'confirmed'
         );
-
+        const tempKeypair = Keypair.generate();
+        const wallet = new CustomWallet(tempKeypair);
         // 仅用于程序初始化的默认 Provider
         const defaultProvider = new AnchorProvider(
             connection,
             // 使用空钱包，因为这个 provider 只用于初始化
-            {
-                publicKey: Keypair.generate().publicKey,
-                signTransaction: async (tx) => tx,
-                signAllTransactions: async (txs) => txs,
-            },
+            wallet,
             {
                 commitment: options.commitment || 'confirmed',
                 preflightCommitment: options.preflightCommitment || 'confirmed',
@@ -162,7 +159,8 @@ export class CustomPumpSDK extends PumpFunSDK {
         this.solanaService = null;
         this.connection = connection;
         this.wsManager = new WebSocketManager(connection.rpcEndpoint);
-        this.program = new Program(IDL, this.PROGRAM_ID, defaultProvider);
+        /** @type {import('@coral-xyz/anchor').Program<import('pumpdotfun-sdk').PumpFun>} */
+        this.program;
         // 从环境变量获取 RPC 节点列表并解析 JSON
         try {
             this.rpcEndpoints = process.env.SOLANA_RPC_ENDPOINTS
@@ -199,13 +197,17 @@ export class CustomPumpSDK extends PumpFunSDK {
         this.ASSOCIATED_TOKEN_PROGRAM_ID = ASSOCIATED_TOKEN_PROGRAM_ID;
         this.PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
     }
+    /**
+     * Creates a program instance
+     * @param {import('@coral-xyz/anchor').Provider} provider
+     * @returns {import('@coral-xyz/anchor').Program<import('pumpdotfun-sdk').PumpFun>}
+     */
     createProgram(provider) {
         if (!provider) {
             throw new Error('Provider is required to create program');
         }
 
         try {
-            // Create Program instance with explicit provider
             return new Program(
                 IDL,
                 this.PROGRAM_ID,
@@ -215,7 +217,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             logger.error('Failed to create program:', {
                 error: error.message,
                 provider: provider?.wallet?.publicKey?.toString(),
-                programId: this.PROGRAM_ID
+                programId: this.PROGRAM_ID.toString()
             });
             throw error;
         }
