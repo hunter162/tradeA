@@ -278,29 +278,26 @@ export class SolanaService {
     }
 
     async createConnection() {
-        try {
-            const endpoint = this.getNextEndpoint();
+            try {
+                this.connection = new Connection(endpoint || this.currentEndpoint, {
+                    commitment: 'confirmed',
+                    confirmTransactionInitialTimeout: 60000,
+                    wsEndpoint: this._getWsEndpoint(endpoint || this.currentEndpoint)
+                });
 
-            // 使用更短的超时时间
-            this.connection = new Connection(endpoint, {
-                ...SOLANA_CONFIG.connectionConfig,
-                wsEndpoint: endpoint.replace('https', 'wss'),
-                confirmTransactionInitialTimeout: this.timeoutSettings.confirmTimeout,
-                httpHeaders: {
-                    'Cache-Control': 'no-cache'
-                }
-            });
+                logger.info('创建新的 RPC 连接:', {
+                    endpoint: (endpoint || this.currentEndpoint).replace(/api-key=([^&]+)/, 'api-key=***'),
+                    timeout: 60000
+                });
 
-            logger.info('创建 Solana 连接:', {
-                endpoint: endpoint.replace(/api-key=([^&]+)/, 'api-key=***'),
-                timeout: this.timeoutSettings.confirmTimeout
-            });
-
-            return true;
-        } catch (error) {
-            logger.error('创建连接失败:', error);
-            return false;
-        }
+                return true;
+            } catch (error) {
+                logger.error('创建 RPC 连接失败:', {
+                    error: error.message,
+                    endpoint: (endpoint || this.currentEndpoint).replace(/api-key=([^&]+)/, 'api-key=***')
+                });
+                throw error;
+            }
     }
 
     async testConnection() {
@@ -984,27 +981,38 @@ export class SolanaService {
 
     // 修改 switchRpcEndpoint 方法
     async switchRpcEndpoint() {
-        // 重新测试所有节点
-        const results = await this.testRpcEndpoints();
-        const availableRpcs = results
-            .filter(r => r.status === 'success')
-            .sort((a, b) => a.latency - b.latency);
+        try {
+            // 重新测试所有节点
+            const results = await this.testRpcEndpoints();
+            const availableRpcs = results
+                .filter(r => r.status === 'success')
+                .sort((a, b) => a.latency - b.latency);
 
-        if (availableRpcs.length === 0) {
-            throw new Error('没有可用的 RPC 节点');
+            if (availableRpcs.length === 0) {
+                throw new Error('没有可用的 RPC 节点');
+            }
+
+            // 选择当前节点之外延迟最低的节点
+            const nextRpc = availableRpcs.find(r => r.endpoint !== this.currentEndpoint) || availableRpcs[0];
+
+            // 使用 createConnection 而不是 initializeConnection
+            await this.createConnection(nextRpc.endpoint);
+            this.currentEndpoint = nextRpc.endpoint;
+
+            logger.info('切换到新的 RPC 节点', {
+                endpoint: nextRpc.endpoint.replace(/api-key=([^&]+)/, 'api-key=***'),
+                latency: `${nextRpc.latency}ms`,
+                reason: 'performance'
+            });
+
+            return nextRpc.endpoint;
+        } catch (error) {
+            logger.error('切换 RPC 节点失败:', {
+                error: error.message,
+                currentEndpoint: this.currentEndpoint
+            });
+            throw error;
         }
-
-        // 选择当前节点之外延迟最低的节点
-        const nextRpc = availableRpcs.find(r => r.endpoint !== this.currentEndpoint) || availableRpcs[0];
-
-        this.initializeConnection(nextRpc.endpoint);
-        this.currentEndpoint = nextRpc.endpoint;
-
-        logger.info('切换到新的 RPC 节点', {
-            endpoint: nextRpc.endpoint,
-            latency: `${nextRpc.latency}ms`,
-            reason: 'performance'
-        });
     }
 
     // 修改 withRetry 方法
@@ -1030,7 +1038,9 @@ export class SolanaService {
                     // 切换节点
                     await this.switchRpcEndpoint();
                     // 指数退避等待
-                    await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+                    await new Promise(resolve =>
+                        setTimeout(resolve, Math.pow(2, attempt) * 1000)
+                    );
                 }
             }
         }
@@ -2534,7 +2544,7 @@ export class SolanaService {
     }
 
     // 更新节点状态
-    updateNodeStats(endpoint, { latency, success, error }) {
+    updateNodeStats(endpoint, { success, error, latency }) {
         const stats = this.nodeStats.get(endpoint);
         if (!stats) return;
 
@@ -2545,6 +2555,12 @@ export class SolanaService {
         } else {
             stats.errorCount++;
             stats.successRate = Math.max(0.1, stats.successRate * 0.8); // 降低成功率但保持最小值
+            if (error) {
+                stats.lastError = {
+                    message: error,
+                    timestamp: Date.now()
+                };
+            }
         }
 
         stats.lastCheck = Date.now();
