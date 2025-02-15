@@ -118,6 +118,25 @@ class TokenLaunchCalculator {
 // 不继承 PumpSDK，而是作为组合使用
 export class CustomPumpSDK extends PumpFunSDK {
     constructor(provider) {
+        if (!provider) {
+            const wallet = new Keypair();
+            const connection = new Connection('https://api.mainnet-beta.solana.com');
+            provider = new AnchorProvider(
+                connection,
+                {
+                    publicKey: wallet.publicKey,
+                    signTransaction: async (tx) => {
+                        tx.partialSign(wallet);
+                        return tx;
+                    },
+                    signAllTransactions: async (txs) => {
+                        txs.forEach(tx => tx.partialSign(wallet));
+                        return txs;
+                    }
+                },
+                { commitment: 'confirmed' }
+            );
+        }
         super(provider);
         this.provider = provider;  //
         this.solanaService = null;
