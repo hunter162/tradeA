@@ -2,7 +2,7 @@ import {createRequire} from 'module';
 
 const require = createRequire(import.meta.url);
 import pkg from 'pumpdotfun-sdk';
-
+import { AnchorProvider, Program, Wallet } from "@coral-xyz/anchor";
 const {PumpFunSDK, GlobalAccount} = pkg;
 import {logger} from '../utils/index.js';
 import {PinataService} from './pinataService.js';
