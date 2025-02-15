@@ -562,7 +562,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             transaction.add(createIx);
 
             // 5. 如果购买金额大于0，添加购买指令
-            if (buyAmountLamports.gt(new BN(0))) {
+            if (buyAmountLamports>=(new BN(0))) {
                 const globalAccount = await this.getGlobalAccount();
 
                 // 确保使用 BigInt 进行价格计算
@@ -572,7 +572,7 @@ export class CustomPumpSDK extends PumpFunSDK {
 
                 // 计算带滑点的金额
                 const slippageBasisPoints = this._ensureBigInt(options.slippageBasisPoints || 100);
-                const buyAmountWithSlippage = this.calculateWithSlippageBuy(
+                const buyAmountWithSlippage =await this.calculateWithSlippageBuy(
                     initialBuyPriceBigInt,
                     slippageBasisPoints
                 );
@@ -582,7 +582,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                     mint.publicKey,
                     globalAccount.feeRecipient,
                     initialBuyPriceBigInt,
-                    buyAmountWithSlippage
+                     buyAmountWithSlippage
                 );
                 transaction.add(buyIx);
 
