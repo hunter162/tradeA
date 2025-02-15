@@ -117,10 +117,11 @@ class TokenLaunchCalculator {
 export class CustomPumpSDK extends PumpFunSDK {
     constructor(provider) {
         super(provider);
+        this.provider = provider;  //
         this.solanaService = null;
         this.connection = provider.connection;
         this.wsManager = new WebSocketManager(provider.connection.rpcEndpoint);
-
+        this.program = this.createProgram(provider);  // Ini
         // 从环境变量获取 RPC 节点列表并解析 JSON
         try {
             this.rpcEndpoints = process.env.SOLANA_RPC_ENDPOINTS
@@ -157,7 +158,12 @@ export class CustomPumpSDK extends PumpFunSDK {
         this.ASSOCIATED_TOKEN_PROGRAM_ID = ASSOCIATED_TOKEN_PROGRAM_ID;
         this.PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
     }
-
+    createProgram(provider) {
+        if (!provider) {
+            throw new Error('Provider is required to create program');
+        }
+        return new Program(IDL, this.PROGRAM_ID, provider);
+    }
     setSolanaService(solanaService) {
         this.solanaService = solanaService;
     }
@@ -1500,6 +1506,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 }
     async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
         try {
+            if (!this.provider) {
+                throw new Error('Provider is required for getting sell instructions');
+            }
+
             // 1. 验证并转换入参
             const sellerPubkey = seller instanceof PublicKey ? seller : new PublicKey(seller);
             const mintPubkey = mint instanceof PublicKey ? mint : new PublicKey(mint);
@@ -1514,16 +1524,12 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             // 3. 获取全局账户
             const globalAccount = await this.getGlobalAccount();
-            logger.info('获取全局账户成功:', {
-                feeRecipient: globalAccount.feeRecipient.toString(),
-                initialReserves: globalAccount.initialVirtualSolReserves.toString()
-            });
 
             // 4. 获取 bonding curve 账户
             const bondingCurveAddress = await this.findBondingCurveAddress(mintPubkey);
 
-            // 5. 构建卖出指令
-            const instruction = await this.program.methods
+            // 5. 使用 provider 的 program 构建指令
+            const instruction = await this.provider.program.methods
                 .sell(new BN(amount.toString()), new BN(slippage.toString()))
                 .accounts({
                     tokenMint: mintPubkey,
@@ -1536,13 +1542,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     tokenProgram: TOKEN_PROGRAM_ID
                 })
                 .instruction();
-
-            logger.info('卖出指令构建成功:', {
-                seller: sellerPubkey.toString(),
-                mint: mintPubkey.toString(),
-                amount: amount.toString(),
-                slippage: `${Number(slippage) / 100}%`
-            });
 
             return instruction;
 
@@ -1558,110 +1557,99 @@ async sendTransactionViaNozomi(transaction, signers, config) {
         }
     }
 // 修改 sell 方法
-// 修改后的 sell 方法
-    // In CustomPumpSDK class
-    async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
-        try {
-            // 1. Validate and convert parameters
-            const mintPubkey = mint instanceof PublicKey ? mint : new PublicKey(mint);
-            const tokenAmount = BigInt(sellTokenAmount.toString());
-            const slippage = BigInt(slippageBasisPoints.toString());
 
-            logger.info('开始卖出代币:', {
-                seller: seller.publicKey.toString(),
-                mint: mintPubkey.toString(),
-                amount: tokenAmount.toString(),
-                slippage: `${Number(slippage) / 100}%`
-            });
+async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
+    try {
+        if (!this.provider) {
+            throw new Error('Provider is required for sell operation');
+        }
 
-            // 2. Ensure we have a valid provider
-            if (!this.provider) {
-                throw new Error('Provider is required for sell operation');
+// 1. Validate and convert parameters
+        const mintPubkey = mint instanceof PublicKey ? mint : new PublicKey(mint);
+        const tokenAmount = BigInt(sellTokenAmount.toString());
+        const slippage = BigInt(slippageBasisPoints.toString());
+
+        logger.info('开始卖出代币:', {
+            seller: seller.publicKey.toString(),
+            mint: mintPubkey.toString(),
+            amount: tokenAmount.toString(),
+            slippage: `${Number(slippage) / 100}%`
+        });
+
+// 2. Use withRetry to wrap the main operation
+        return await this.withRetry(async () => {
+            // 3. Get sell instructions using the provider
+            const sellIx = await this.getSellInstructions(
+                seller.publicKey,
+                mintPubkey,
+                tokenAmount,
+                slippage
+            );
+
+            // 4. Create transaction
+            const sellTx = new Transaction();
+
+            // 5. Add priority fees if needed
+            if (options.usePriorityFee) {
+                const jitoService = new JitoService(this.connection);
+                const priorityTx = await jitoService.addPriorityFee(sellTx, {
+                    type: options.priorityType || 'jito',
+                    tipAmountSol: priorityFees?.tipAmountSol
+                });
+                sellTx.add(...priorityTx.instructions);
+            } else if (priorityFees?.microLamports) {
+                sellTx.add(
+                    ComputeBudgetProgram.setComputeUnitPrice({
+                        microLamports: priorityFees.microLamports
+                    })
+                );
             }
 
-            // 3. Use withRetry to wrap the main operation
-            return await this.withRetry(async () => {
-                // 4. Get sell instructions
-                const sellIx = await this.getSellInstructions(
-                    seller.publicKey,
-                    mintPubkey,
-                    tokenAmount,
-                    slippage
-                );
+            // 6. Add sell instruction
+            sellTx.add(sellIx);
 
-                // 5. Create transaction
-                const sellTx = new Transaction();
+            // 7. Get latest blockhash
+            const {blockhash, lastValidBlockHeight} =
+                await this.connection.getLatestBlockhash('confirmed');
 
-                // 6. Add priority fees if needed
-                if (options.usePriorityFee) {
-                    const jitoService = new JitoService(this.connection);
-                    const priorityTx = await jitoService.addPriorityFee(sellTx, {
-                        type: options.priorityType || 'jito',
-                        tipAmountSol: priorityFees?.tipAmountSol
-                    });
-                    sellTx.add(...priorityTx.instructions);
+            sellTx.recentBlockhash = blockhash;
+            sellTx.lastValidBlockHeight = lastValidBlockHeight;
+            sellTx.feePayer = seller.publicKey;
+
+            // 8. Send and confirm transaction
+            const signature = await sendAndConfirmTransaction(
+                this.connection,
+                sellTx,
+                [seller],
+                {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                    commitment: 'confirmed'
                 }
-                else if (priorityFees?.microLamports) {
-                    sellTx.add(
-                        ComputeBudgetProgram.setComputeUnitPrice({
-                            microLamports: priorityFees.microLamports
-                        })
-                    );
-                }
+            );
 
-                // 7. Add sell instruction
-                sellTx.add(sellIx);
+            return {
+                signature,
+                txId: signature,
+                amount: tokenAmount.toString(),
+                mint: mintPubkey.toString(),
+                owner: seller.publicKey.toString(),
+                slippage: `${Number(slippage) / 100}%`,
+                timestamp: Date.now()
+            };
+        });
 
-                // 8. Get latest blockhash
-                const { blockhash, lastValidBlockHeight } =
-                    await this.connection.getLatestBlockhash('confirmed');
-
-                sellTx.recentBlockhash = blockhash;
-                sellTx.lastValidBlockHeight = lastValidBlockHeight;
-                sellTx.feePayer = seller.publicKey;
-
-                // 9. Simulate transaction
-                const simulation = await this.connection.simulateTransaction(sellTx, [seller]);
-
-                if (simulation.value.err) {
-                    throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
-                }
-
-                // 10. Send and confirm transaction
-                const signature = await sendAndConfirmTransaction(
-                    this.connection,
-                    sellTx,
-                    [seller],
-                    {
-                        skipPreflight: false,
-                        preflightCommitment: 'confirmed',
-                        commitment: 'confirmed'
-                    }
-                );
-
-                // 11. Return result
-                return {
-                    signature,
-                    txId: signature,
-                    amount: tokenAmount.toString(),
-                    mint: mintPubkey.toString(),
-                    owner: seller.publicKey.toString(),
-                    slippage: `${Number(slippage) / 100}%`,
-                    timestamp: Date.now()
-                };
-            });
-
-        } catch (error) {
-            logger.error('卖出代币失败:', {
-                error: error.message,
-                mint: mint.toString(),
-                amount: sellTokenAmount.toString(),
-                seller: seller.publicKey.toString(),
-                stack: error.stack
-            });
-            throw error;
-        }
+    } catch (error) {
+        logger.error('卖出代币失败:', {
+            error: error.message,
+            mint: mint.toString(),
+            amount: sellTokenAmount.toString(),
+            seller: seller.publicKey.toString(),
+            stack: error.stack
+        });
+        throw error;
     }
+}
 
 // 修改 getGlobalAccount 方法
 async getGlobalAccount()

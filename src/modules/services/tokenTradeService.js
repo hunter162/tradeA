@@ -197,7 +197,7 @@ export class TokenTradeService {
 // In TokenTradeService class (tokenTradeService.js)
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         try {
-            // 1. 获取钱包 Keypair (使用 getWalletKeypair 而不是 getWallet)
+            // 1. 获取钱包 Keypair
             const keypair = await this.solanaService.walletService.getWalletKeypair(groupType, accountNumber);
             if (!keypair) {
                 throw new Error('Wallet not found');
@@ -227,10 +227,13 @@ export class TokenTradeService {
                 percentage: `${percentage}%`
             });
 
-            // 4. 创建对应的 Provider
+            // 4. 创建钱包实例
+            const wallet = new Wallet(keypair);
+
+            // 5. 创建并配置 Provider
             const provider = new AnchorProvider(
                 this.solanaService.connection,
-                new Wallet(keypair),
+                wallet,
                 {
                     commitment: 'confirmed',
                     preflightCommitment: 'confirmed',
@@ -238,17 +241,17 @@ export class TokenTradeService {
                 }
             );
 
-            // 5. 创建 CustomPumpSDK 实例
+            // 6. 创建 SDK 实例
             const sdk = new CustomPumpSDK(provider);
             sdk.setSolanaService(this.solanaService);
 
-            // 6. 准备优先费用选项
+            // 7. 准备优先费用选项
             const priorityFees = options.usePriorityFee ? {
                 microLamports: options.microLamports,
                 type: options.priorityType || 'default'
             } : undefined;
 
-            // 7. 执行卖出操作
+            // 8. 执行卖出操作
             const result = await sdk.sell(
                 keypair,
                 new PublicKey(tokenAddress),
@@ -262,7 +265,7 @@ export class TokenTradeService {
                 }
             );
 
-            // 8. 保存交易记录
+            // 9. 保存交易记录
             await this.saveTradeTransaction({
                 signature: result.signature,
                 mint: tokenAddress,
