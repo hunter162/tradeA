@@ -1559,9 +1559,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     }
 // 修改 sell 方法
 // 修改后的 sell 方法
+    // In CustomPumpSDK class
     async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
         try {
-            // 1. 验证和转换参数
+            // 1. Validate and convert parameters
             const mintPubkey = mint instanceof PublicKey ? mint : new PublicKey(mint);
             const tokenAmount = BigInt(sellTokenAmount.toString());
             const slippage = BigInt(slippageBasisPoints.toString());
@@ -1573,20 +1574,34 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 slippage: `${Number(slippage) / 100}%`
             });
 
-            // 2. 使用 withRetry 包装主要操作
+            // 2. Create a new provider with the seller's wallet
+            const newProvider = new AnchorProvider(
+                this.connection,
+                new Wallet(seller),
+                {
+                    commitment: 'confirmed',
+                    preflightCommitment: 'confirmed',
+                    skipPreflight: false
+                }
+            );
+
+            // 3. Create a new SDK instance with the new provider
+            const sdkWithWallet = new CustomPumpSDK(newProvider);
+
+            // 4. Use withRetry to wrap the main operation
             return await this.withRetry(async () => {
-                // 3. 获取卖出指令
-                const sellIx = await this.getSellInstructions(
+                // 5. Get sell instructions with the new SDK instance
+                const sellIx = await sdkWithWallet.getSellInstructions(
                     seller.publicKey,
                     mintPubkey,
                     tokenAmount,
                     slippage
                 );
 
-                // 4. 创建交易
+                // 6. Create transaction
                 const sellTx = new Transaction();
 
-                // 5. 添加优先上链费用（如果需要）
+                // 7. Add priority fees if needed
                 if (options.usePriorityFee) {
                     const jitoService = new JitoService(this.connection);
                     const priorityTx = await jitoService.addPriorityFee(sellTx, {
@@ -1603,10 +1618,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     );
                 }
 
-                // 6. 添加卖出指令
+                // 8. Add sell instruction
                 sellTx.add(sellIx);
 
-                // 7. 获取最新的 blockhash
+                // 9. Get latest blockhash
                 const { blockhash, lastValidBlockHeight } =
                     await this.connection.getLatestBlockhash('confirmed');
 
@@ -1614,14 +1629,14 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 sellTx.lastValidBlockHeight = lastValidBlockHeight;
                 sellTx.feePayer = seller.publicKey;
 
-                // 8. 模拟交易
+                // 10. Simulate transaction
                 const simulation = await this.connection.simulateTransaction(sellTx, [seller]);
 
                 if (simulation.value.err) {
                     throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
                 }
 
-                // 9. 发送交易
+                // 11. Send and confirm transaction
                 const signature = await sendAndConfirmTransaction(
                     this.connection,
                     sellTx,
@@ -1633,7 +1648,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     }
                 );
 
-                // 10. 返回结果
+                // 12. Return result
                 return {
                     signature,
                     txId: signature,

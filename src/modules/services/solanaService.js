@@ -786,23 +786,23 @@ export class SolanaService {
         }
     }
 
+    // In SolanaService class
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         try {
-            logger.info('开始卖出代币:', {groupType, accountNumber, tokenAddress})
+            logger.info('开始卖出代币:', {
+                groupType,
+                accountNumber,
+                tokenAddress,
+                percentage
+            });
+
             // 1. Get wallet keypair
             const keypair = await this.walletService.getWalletKeypair(groupType, accountNumber);
-            logger.info("keypair",keypair);
             if (!keypair) {
                 throw new Error('Failed to get wallet keypair');
             }
-            logger.info('开始卖出代币2:', {groupType, accountNumber, tokenAddress})
-            // 2. Get token info and balance
-            const tokenInfo = await this.getTokenInfo(tokenAddress);
-            if (!tokenInfo) {
-                throw new Error(`Token ${tokenAddress} not found`);
-            }
 
-            // 3. Calculate sell amount based on percentage
+            // 2. Get token balance
             const tokenAccount = await getAssociatedTokenAddress(
                 new PublicKey(tokenAddress),
                 keypair.publicKey
@@ -813,6 +813,7 @@ export class SolanaService {
                 throw new Error('Failed to get token balance');
             }
 
+            // 3. Calculate sell amount based on percentage
             const sellAmount = BigInt(Math.floor(
                 Number(tokenBalance.value.amount) * (percentage / 100)
             ));
@@ -821,12 +822,27 @@ export class SolanaService {
                 throw new Error('Invalid sell amount');
             }
 
-            // 4. Call SDK's sell method
-            const result = await this.sdk.sell(
-                keypair, // Pass the Keypair directly
+            // 4. Create a new provider with the wallet
+            const provider = new AnchorProvider(
+                this.connection,
+                new Wallet(keypair),
+                {
+                    commitment: 'confirmed',
+                    preflightCommitment: 'confirmed',
+                    skipPreflight: false
+                }
+            );
+
+            // 5. Create a new SDK instance with the provider
+            const sdkWithWallet = new CustomPumpSDK(provider);
+            sdkWithWallet.setSolanaService(this);
+
+            // 6. Call SDK's sell method
+            const result = await sdkWithWallet.sell(
+                keypair,
                 new PublicKey(tokenAddress),
                 sellAmount,
-                BigInt(options.slippage || 100), // 1% default slippage
+                BigInt(options.slippage || 100),
                 options.priorityFeeSol ? {
                     tipAmountSol: options.priorityFeeSol
                 } : undefined,
