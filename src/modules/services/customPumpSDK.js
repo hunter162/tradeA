@@ -33,7 +33,8 @@ import https from 'https';
 import {WebSocketManager} from './webSocketManager.js';
 import {SolanaService} from './solanaService.js';
 import {sendAndConfirmTransaction} from '@solana/web3.js';
-import {IDL} from "pumpdotfun-sdk/dist/cjs/IDL/index.js";
+import idlModule from 'pumpdotfun-sdk/dist/cjs/IDL/index.js';
+const { IDL } = idlModule;
 
 // 修改常量设置
 const MIN_COMPUTE_UNITS = 200_000;  // 保持计算单元不变
