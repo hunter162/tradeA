@@ -2,13 +2,13 @@ import {createRequire} from 'module';
 
 const require = createRequire(import.meta.url);
 import pkg from 'pumpdotfun-sdk';
-import { AnchorProvider, Program, Wallet } from "@coral-xyz/anchor";
+import { AnchorProvider, Program } from "@coral-xyz/anchor";
 const {PumpFunSDK, GlobalAccount} = pkg;
 import {logger} from '../utils/index.js';
 import {PinataService} from './pinataService.js';
 import {config} from '../../config/index.js';
 import fs from 'fs/promises';
-import CustomAnchorWallet from './CustomAnchorWallet.js';
+
 import {
     Transaction as SolanaTransaction,
     SystemProgram,
@@ -137,31 +137,32 @@ class CustomWallet {
 // 不继承 PumpSDK，而是作为组合使用
 export class CustomPumpSDK extends PumpFunSDK {
     constructor(options = {}) {
-        // Create default wallet if not provided
-        const customWallet = new CustomAnchorWallet(options.keypair || Keypair.generate());
-
-        // Create connection if not provided
         const connection = options.connection || new Connection(
             options.rpcEndpoint || 'https://api.mainnet-beta.solana.com',
-            'confirmed'
+            options.commitment || 'confirmed'
         );
 
-        // Create AnchorProvider
-        const provider = new AnchorProvider(
+        // 仅用于程序初始化的默认 Provider
+        const defaultProvider = new AnchorProvider(
             connection,
-            customWallet,
+            // 使用空钱包，因为这个 provider 只用于初始化
+            {
+                publicKey: Keypair.generate().publicKey,
+                signTransaction: async (tx) => tx,
+                signAllTransactions: async (txs) => txs,
+            },
             {
                 commitment: options.commitment || 'confirmed',
                 preflightCommitment: options.preflightCommitment || 'confirmed',
                 skipPreflight: options.skipPreflight || false
             }
         );
-        super(provider);
-        this.provider = provider;  //
+        super(defaultProvider);
+        this.provider = defaultProvider;  //
         this.solanaService = null;
-        this.connection = provider.connection;
-        this.wsManager = new WebSocketManager(provider.connection.rpcEndpoint);
-        this.program = this.createProgram(provider);  // Ini
+        this.connection = connection;
+        this.wsManager = new WebSocketManager(connection.rpcEndpoint);
+        this.program = new Program(IDL, this.PROGRAM_ID, defaultProvider);
         // 从环境变量获取 RPC 节点列表并解析 JSON
         try {
             this.rpcEndpoints = process.env.SOLANA_RPC_ENDPOINTS
@@ -222,7 +223,29 @@ export class CustomPumpSDK extends PumpFunSDK {
     setSolanaService(solanaService) {
         this.solanaService = solanaService;
     }
+    async createTransaction(signerPublicKey) {
+        try {
+            const transaction = new Transaction();
 
+            // 设置签名者
+            transaction.feePayer = signerPublicKey;
+
+            // 获取最新的 blockhash
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('confirmed');
+
+            transaction.recentBlockhash = blockhash;
+            transaction.lastValidBlockHeight = lastValidBlockHeight;
+
+            return transaction;
+        } catch (error) {
+            logger.error('创建交易失败:', {
+                error: error.message,
+                signer: signerPublicKey.toString()
+            });
+            throw error;
+        }
+    }
     // 切换 RPC 节点
     async switchRpcEndpoint() {
         try {
@@ -735,7 +758,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                 });
 
                 // 发送交易
-                const signature = await connection.sendTransaction(
+                const signature = await this.connection.sendTransaction(
                     transaction,
                     signers,
                     {
@@ -750,7 +773,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                 });
 
                 // 等待确认
-                const confirmation = await connection.confirmTransaction(
+                const confirmation = await this.connection.confirmTransaction(
                     {
                         signature,
                         blockhash: transaction.recentBlockhash,
