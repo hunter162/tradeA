@@ -495,12 +495,35 @@ export class CustomPumpSDK extends PumpFunSDK {
 
             // 转换为 lamports
             const lamports = Math.floor(amount * LAMPORTS_PER_SOL);
-
-            return this._convertToBN(lamports);
+            return BigInt(lamports);
         } catch (error) {
             logger.error('SOL转Lamports失败:', {
                 error: error.message,
                 solAmount
+            });
+            throw error;
+        }
+    }
+    _ensureBigInt(value) {
+        try {
+            if (typeof value === 'bigint') {
+                return value;
+            }
+            if (typeof value === 'number') {
+                return BigInt(Math.floor(value));
+            }
+            if (typeof value === 'string') {
+                return BigInt(value.replace(/[^\d]/g, ''));
+            }
+            if (value?.toString) {
+                return BigInt(value.toString());
+            }
+            throw new Error(`Cannot convert ${typeof value} to BigInt`);
+        } catch (error) {
+            logger.error('BigInt 转换失败:', {
+                error: error.message,
+                value: typeof value === 'object' ? JSON.stringify(value) : value,
+                type: typeof value
             });
             throw error;
         }
@@ -522,7 +545,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             // 1. 创建代币元数据
             const tokenMetadata = await this.createTokenMetadata(metadata);
 
-            // 2. 转换购买金额为 BN (lamports)
+            // 2. 转换购买金额为 lamports (BigInt)
             const buyAmountLamports = this._solToLamports(buyAmountSol);
 
             // 3. 构建交易
@@ -542,28 +565,29 @@ export class CustomPumpSDK extends PumpFunSDK {
             if (buyAmountLamports.gt(new BN(0))) {
                 const globalAccount = await this.getGlobalAccount();
 
-                // 获取初始购买价格
-                const initialBuyPrice = globalAccount.getInitialBuyPrice(buyAmountLamports);
+                // 确保使用 BigInt 进行价格计算
+                const initialBuyPriceBigInt = this._ensureBigInt(
+                    globalAccount.getInitialBuyPrice(buyAmountLamports)
+                );
 
                 // 计算带滑点的金额
-                const slippageBasisPoints = this._convertToBN(options.slippageBasisPoints || 100);
-                const buyAmountWithSlippage = this.calculateSlippage(
-                    initialBuyPrice,
+                const slippageBasisPoints = this._ensureBigInt(options.slippageBasisPoints || 100);
+                const buyAmountWithSlippage = this.calculateWithSlippageBuy(
+                    initialBuyPriceBigInt,
                     slippageBasisPoints
                 );
 
-                // 添加购买指令
                 const buyIx = await this.getBuyInstructions(
                     creator.publicKey,
                     mint.publicKey,
                     globalAccount.feeRecipient,
-                    initialBuyPrice,
+                    initialBuyPriceBigInt,
                     buyAmountWithSlippage
                 );
                 transaction.add(buyIx);
 
                 logger.debug('购买指令已添加:', {
-                    initialPrice: initialBuyPrice.toString(),
+                    initialPrice: initialBuyPriceBigInt.toString(),
                     withSlippage: buyAmountWithSlippage.toString(),
                     slippage: `${slippageBasisPoints.toString()} basis points`
                 });
