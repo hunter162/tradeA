@@ -1633,26 +1633,32 @@ export class SolanaService {
                 mint: mint.publicKey.toString()
             });
 
+            // 3. 转换 SOL 金额为 lamports
             const lamports = BigInt(Math.floor(solAmount * LAMPORTS_PER_SOL));
 
-            // 3. 执行创建和购买操作
+            // 4. 执行创建和购买操作
             const result = await this.sdk.createAndBuy(
-                wallet,
-                mint,
-                metadata,
-                lamports,
-                options
+                wallet,    // creator keypair
+                mint,      // mint keypair
+                metadata,  // token metadata
+                lamports,  // buy amount in lamports
+                {
+                    ...options,
+                    slippageBasisPoints: BigInt(options.slippageBasisPoints || 100)
+                }
             );
 
-            logger.info("开始执行数据库保存");
+            // 确保结果包含必要的字段
+            if (!result || !result.signature) {
+                throw new Error('Invalid response from createAndBuy operation');
+            }
 
-            // 保存到数据库
+            // 构建统一的返回结果
+            const mintAddress = mint.publicKey.toString();
+
+            // 5. 创建代币数据记录
             const tokenData = {
-                mint: result.mint instanceof PublicKey
-                    ? result.mint.toString()
-                    : (typeof result.mint === 'object'
-                        ? result.mint.publicKey.toString()
-                        : result.mint),
+                mint: mintAddress,
                 owner: wallet.publicKey.toString(),
                 name: metadata.name,
                 symbol: metadata.symbol,
@@ -1663,94 +1669,63 @@ export class SolanaService {
                 groupType,
                 accountNumber,
                 metadata: metadata,
-                uri: result.metadata.uri,
+                uri: result.metadata?.uri || '',
                 status: 'active'
             };
 
-            logger.info('保存代币数据:', {
-                mint: tokenData.mint,
-                owner: tokenData.owner,
-                name: tokenData.name,
-                symbol: tokenData.symbol
-            });
+            // 6. 保存到数据库
+            const savedToken = await db.models.Token.create(tokenData);
 
-            // 保存代币信息
-            await db.models.Token.create(tokenData);
-
-            logger.info('代币数据保存成功:', {
-                mint: tokenData.mint,
-                name: tokenData.name,
-                symbol: tokenData.symbol
-            });
-
-            // 5. 保存交易记录
+            // 7. 记录交易
             await db.models.Transaction.create({
                 signature: result.signature,
-                mint: result.mint,
+                mint: mintAddress,
                 owner: wallet.publicKey.toString(),
                 type: 'create_and_buy',
-                amount: solAmount.toString(), // 转换为字符串
+                amount: solAmount.toString(),
                 status: 'success',
                 raw: {
                     ...result,
-                    solAmount: solAmount.toString(), // 转换为字符串
+                    solAmount: solAmount.toString(),
                     metadata,
                     timestamp: new Date().toISOString()
                 }
             });
 
-            // 6. 更新 Redis 缓存中的代币余额
+            // 8. 设置代币跟踪
             if (this.redis) {
-                const tokenBalanceKey = CACHE_KEYS.TOKEN_BALANCE(wallet.publicKey.toString(), result.mint);
-                await this.redis.set(tokenBalanceKey, result.tokenAmount.toString(), { EX: 60 }); // 转换为字符串
-
-                logger.info('更新代币余额缓存:', {
-                    key: tokenBalanceKey,
-                    balance: result.tokenAmount.toString()
-                });
+                const tokenBalanceKey = CACHE_KEYS.TOKEN_BALANCE(wallet.publicKey.toString(), mintAddress);
+                await this.redis.set(tokenBalanceKey, result.tokenAmount || '0', { EX: 60 });
             }
 
-            // 7. 订阅代币余额变动
-            if (result?.mint) {  // 添加空值检查
-                await this.tokenSubscriptionService.subscribeToTokenBalance(
-                    wallet.publicKey.toString(),
-                    result.mint
-                );
-            }
-
-            logger.info('代币创建和购买成功:', {
-                mint: result?.mint,  // 添加可选链操作符
-                owner: wallet?.publicKey?.toString(),
-                signature: result?.signature,
-                solAmount: solAmount?.toString(),
-                tokenAmount: result?.tokenAmount?.toString(),
-                metadata: {
-                    name: metadata?.name,
-                    symbol: metadata?.symbol,
-                    uri: result?.metadata?.uri
-                }
-            });
-
-            // 6. 更新 Redis 缓存并设置 WebSocket 订阅
+            // 9. 订阅代币余额变动
             await this.setupTokenTracking(
                 wallet.publicKey.toString(),
-                result.mint,
-                result.tokenAmount.toString()
+                mintAddress,
+                result.tokenAmount || '0'
             );
+
+            logger.info('代币创建和购买成功:', {
+                mint: mintAddress,
+                owner: wallet.publicKey.toString(),
+                signature: result.signature,
+                solAmount: solAmount.toString()
+            });
 
             return {
                 success: true,
-                mint: result?.mint,
-                owner: wallet?.publicKey?.toString(),
-                signature: result?.signature,
-                solAmount: solAmount?.toString(),
-                tokenAmount: result?.tokenAmount?.toString(),
+                signature: result.signature,
+                mint: mintAddress,
+                owner: wallet.publicKey.toString(),
+                solAmount: solAmount.toString(),
+                tokenAmount: result.tokenAmount || '0',
                 metadata: {
-                    name: metadata?.name,
-                    symbol: metadata?.symbol,
-                    uri: result?.metadata?.uri
+                    name: metadata.name,
+                    symbol: metadata.symbol,
+                    uri: result.metadata?.uri || ''
                 }
             };
+
         } catch (error) {
             logger.error('创建和购买代币失败:', {
                 error: error.message,
