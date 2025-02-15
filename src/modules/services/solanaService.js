@@ -2179,9 +2179,6 @@ export class SolanaService {
                         // 更新缓存
                         await this.updateTokenBalanceCache(owner, mint, newBalance);
 
-                        // 更新数据库
-                        await this.updateTokenBalanceDB(owner, mint, newBalance);
-
                         // 更新最后更新时间
                         const subscription = this.activeSubscriptions.get(subscriptionKey);
                         if (subscription) {
@@ -2217,43 +2214,40 @@ export class SolanaService {
             throw error;
         }
     }
-
-    // 获取代币余额（带缓存）
-    async getTokenBalance(owner, mint) {
+    async updateTokenBalanceCache(owner, mint, balance) {
         try {
-            // 1. 尝试从缓存获取
-            const cachedBalance = await this.getCachedTokenBalance(owner, mint);
-            if (cachedBalance !== null) {
-                return cachedBalance;
+            if (!this.redis) {
+                return;
             }
 
-            // 2. 从链上获取
-            const tokenAccount = await this.findAssociatedTokenAddress(owner, mint);
-            const accountInfo = await this.connection.getAccountInfo(tokenAccount);
+            const cacheKey = `token:balance:${owner}:${mint}`;
+            const balanceData = {
+                balance: balance.toString(),
+                lastUpdate: Date.now()
+            };
 
-            if (!accountInfo) {
-                return BigInt(0);
-            }
+            await this.redis.set(
+                cacheKey,
+                JSON.stringify(balanceData),
+                'EX',
+                300 // 5分钟过期
+            );
 
-            const balance = await this.parseTokenAccountData(accountInfo.data);
-
-            // 3. 更新缓存
-            await this.cacheTokenBalance(owner, mint, balance);
-
-            // 4. 确保有订阅
-            await this.setupTokenSubscription(owner, mint);
-
-            return balance;
+            logger.debug('代币余额缓存已更新:', {
+                owner,
+                mint,
+                balance: balance.toString()
+            });
         } catch (error) {
-            logger.error('获取代币余额失败:', {
+            logger.error('更新代币余额缓存失败:', {
                 error: error.message,
                 owner,
-                mint
+                mint,
+                balance: balance.toString()
             });
-            throw error;
+            // 不抛出错误，让流程继续
         }
     }
-
     // 清理方法
     async cleanup() {
         try {
@@ -2888,74 +2882,6 @@ export class SolanaService {
         });
         return false;
     }
-
-    // 修改: 改进 WebSocket 订阅处理
-    async setupTokenSubscription(owner, mint) {
-        try {
-            const subscriptionKey = `${owner}:${mint}`;
-
-            // 1. 检查现有订阅
-            if (this.activeSubscriptions.has(subscriptionKey)) {
-                const existing = this.activeSubscriptions.get(subscriptionKey);
-                if (Date.now() - existing.lastUpdate < 60000) { // 1分钟内的订阅视为有效
-                    return existing.id;
-                }
-            }
-
-            // 2. 获取代币账户地址
-            const tokenAccount = await this.findAssociatedTokenAddress(owner, mint);
-
-            // 3. 设置新的订阅
-            const subscriptionId = await this.wsManager.subscribeToAccount(
-                tokenAccount,
-                async (accountInfo) => {
-                    try {
-                        // 解析新余额
-                        const data = AccountLayout.decode(accountInfo.data);
-                        const newBalance = BigInt(data.amount.toString());
-
-                        // 更新缓存
-                        await this.updateTokenBalanceCache(owner, mint, newBalance);
-
-                        // 更新数据库
-                        await this.updateTokenBalanceDB(owner, mint, newBalance);
-
-                        // 更新最后更新时间
-                        const subscription = this.activeSubscriptions.get(subscriptionKey);
-                        if (subscription) {
-                            subscription.lastUpdate = Date.now();
-                            this.activeSubscriptions.set(subscriptionKey, subscription);
-                        }
-
-                    } catch (error) {
-                        logger.error('处理代币余额更新失败:', {
-                            error: error.message,
-                            owner,
-                            mint
-                        });
-                    }
-                }
-            );
-
-            // 4. 保存订阅信息
-            this.activeSubscriptions.set(subscriptionKey, {
-                id: subscriptionId,
-                owner,
-                mint,
-                lastUpdate: Date.now()
-            });
-
-            return subscriptionId;
-        } catch (error) {
-            logger.error('设置代币订阅失败:', {
-                error: error.message,
-                owner,
-                mint
-            });
-            throw error;
-        }
-    }
-
     async getTokenInfo(tokenAddress) {
         try {
             // 1. 验证代币地址
