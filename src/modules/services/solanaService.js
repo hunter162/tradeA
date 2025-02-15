@@ -1009,16 +1009,28 @@ export class SolanaService {
 
     // 修改 withRetry 方法
     async withRetry(operation, maxRetries = 3) {
-        let lastError;
-        for (let i = 0; i < maxRetries; i++) {
+        let lastError = null;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
             try {
                 return await operation();
             } catch (error) {
                 lastError = error;
-                logger.warn(`操作失败，尝试重试 (${i + 1}/${maxRetries}):`, error);
-                if (i < maxRetries - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-                    await this.createConnection(); // 切换节点重试
+
+                // 检查是否是余额不足错误
+                if (error.message.includes('Insufficient balance')) {
+                    throw error; // 直接抛出，不需要重试
+                }
+
+                logger.warn(`操作失败，尝试重试 (${attempt + 1}/${maxRetries}):`, {
+                    error: error.message,
+                    attempt: attempt + 1
+                });
+
+                if (attempt < maxRetries - 1) {
+                    // 切换节点
+                    await this.switchRpcEndpoint();
+                    // 指数退避等待
+                    await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
                 }
             }
         }
@@ -1611,135 +1623,9 @@ export class SolanaService {
 
     // In CustomPumpSDK class (customPumpSDK.js)
 
-    async createAndBuy(creator, mint, metadata, buyAmountSol, options = {}) {
-        try {
-            // Validate inputs
-            if (!creator?.publicKey) throw new Error('Invalid creator wallet');
-            if (!mint?.publicKey) throw new Error('Invalid mint keypair');
-            if (!metadata?.name || !metadata?.symbol) throw new Error('Invalid metadata');
-
-            logger.info('Starting token creation and purchase:', {
-                creator: creator.publicKey.toString(),
-                mint: mint.publicKey.toString(),
-                metadata: {
-                    name: metadata.name,
-                    symbol: metadata.symbol
-                },
-                buyAmount: buyAmountSol.toString()
-            });
-
-            // 1. Create token metadata
-            const tokenMetadata = await this.createTokenMetadata(metadata);
-
-            // 2. Get initial buy amount
-            const buyAmountLamports = BigInt(buyAmountSol.toString());
-
-            // 3. Get slippage settings
-            const slippageBasisPoints = BigInt(options.slippageBasisPoints || 100);
-
-            // 4. Build and send transaction
-            const transaction = new SolanaTransaction();
-
-            // 4.1 Get create instructions
-            const createIx = await this.getCreateInstructions(
-                creator.publicKey,
-                metadata.name,
-                metadata.symbol,
-                tokenMetadata.metadataUri,
-                mint
-            );
-            transaction.add(createIx);
-
-            // 4.2 Get buy instructions if amount > 0
-            if (buyAmountLamports > 0n) {
-                const globalAccount = await this.getGlobalAccount();
-                const buyAmount = globalAccount.getInitialBuyPrice(buyAmountLamports);
-                const buyAmountWithSlippage = this.calculateWithSlippageBuy(
-                    buyAmount,
-                    slippageBasisPoints
-                );
-
-                const buyIx = await this.getBuyInstructions(
-                    creator.publicKey,
-                    mint.publicKey,
-                    globalAccount.feeRecipient,
-                    buyAmount,
-                    buyAmountWithSlippage
-                );
-                transaction.add(buyIx);
-            }
-
-            // 5. Send transaction
-            const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
-
-            transaction.recentBlockhash = blockhash;
-            transaction.lastValidBlockHeight = lastValidBlockHeight;
-            transaction.feePayer = creator.publicKey;
-
-            const signature = await this.sendTransactionWithLogs(
-                this.connection,
-                transaction,
-                [creator, mint],
-                {
-                    skipPreflight: false,
-                    preflightCommitment: 'confirmed',
-                    commitment: 'confirmed',
-                    maxRetries: 3
-                }
-            );
-
-            // 6. Get token amount after creation
-            const tokenAccount = await this.findAssociatedTokenAddress(
-                creator.publicKey,
-                mint.publicKey
-            );
-
-            let tokenAmount = '0';
-            try {
-                const balance = await this.connection.getTokenAccountBalance(tokenAccount);
-                tokenAmount = balance.value.amount;
-            } catch (error) {
-                logger.warn('Failed to get token balance:', error);
-            }
-
-            // 7. Return standardized response
-            const result = {
-                success: true,
-                signature,
-                mint: mint.publicKey.toString(),
-                creator: creator.publicKey.toString(),
-                tokenAmount,
-                solAmount: buyAmountSol.toString(),
-                metadata: {
-                    name: metadata.name,
-                    symbol: metadata.symbol,
-                    uri: tokenMetadata.metadataUri
-                },
-                timestamp: Date.now()
-            };
-
-            logger.info('Token creation and purchase successful:', {
-                signature,
-                mint: result.mint,
-                tokenAmount
-            });
-
-            return result;
-
-        } catch (error) {
-            logger.error('Token creation and purchase failed:', {
-                error: error.message,
-                stack: error.stack,
-                creator: creator?.publicKey?.toString(),
-                mint: mint?.publicKey?.toString()
-            });
-            throw error;
-        }
-    }
     async createAndBuy({ groupType, accountNumber, metadata, solAmount, options = {} }) {
         try {
-            logger.info('Starting token creation process:', {
+            logger.info('开始创建和购买代币:', {
                 groupType,
                 accountNumber,
                 metadata: {
@@ -1749,39 +1635,76 @@ export class SolanaService {
                 solAmount
             });
 
-            // 1. Get wallet
+            // 1. 验证输入参数
+            if (!solAmount || solAmount <= 0) {
+                throw new Error('Invalid SOL amount');
+            }
+
+            // 2. 获取钱包
             const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
             if (!wallet) {
                 throw new Error(`Wallet not found: ${groupType}-${accountNumber}`);
             }
 
-            // 2. Generate mint keypair
+            // 3. 获取最佳 RPC 节点
+            const bestEndpoint = await this.getBestNode();
+            this.connection = new Connection(bestEndpoint, {
+                commitment: 'confirmed',
+                confirmTransactionInitialTimeout: 60000,
+                wsEndpoint: this._getWsEndpoint(bestEndpoint)
+            });
+
+            // 4. 检查余额
+            const currentBalance = await this.getBalance(wallet.publicKey);
+            const requiredBalance = solAmount + 0.01; // 添加一些额外的 SOL 用于手续费
+            if (currentBalance < requiredBalance) {
+                throw new Error(`Insufficient balance. Required: ${requiredBalance} SOL, Current: ${currentBalance} SOL`);
+            }
+
+            // 5. 生成 mint keypair
             const mint = Keypair.generate();
-            logger.info('Generated mint keypair:', {
+            logger.info('生成 mint keypair:', {
                 mint: mint.publicKey.toString()
             });
 
-            // 3. Convert SOL amount to lamports
-            const buyAmountSol = BigInt(Math.floor(solAmount * LAMPORTS_PER_SOL));
-
-            // 4. Execute creation and purchase
-            const result = await this.sdk.createAndBuy(
-                wallet,
-                mint,
-                metadata,
-                buyAmountSol,
-                {
-                    ...options,
-                    slippageBasisPoints: BigInt(options.slippageBasisPoints || 100)
+            // 6. 准备元数据
+            const tokenMetadata = {
+                name: metadata.name.slice(0, 32), // 限制名称长度
+                symbol: metadata.symbol.slice(0, 10), // 限制符号长度
+                description: metadata.description?.slice(0, 200),
+                image: metadata.image || '',
+                external_url: metadata.external_url || '',
+                // 添加其他自定义字段
+                attributes: metadata.attributes || [],
+                properties: {
+                    creators: [
+                        {
+                            address: wallet.publicKey.toString(),
+                            share: 100
+                        }
+                    ]
                 }
-            );
+            };
 
-            if (!result || !result.signature || !result.mint) {
-                logger.error('Invalid SDK response:', { result });
-                throw new Error('Invalid response from createAndBuy operation');
+            // 7. 执行创建和购买
+            const result = await this.withRetry(async () => {
+                return await this.sdk.createAndBuy(
+                    wallet,
+                    mint,
+                    tokenMetadata,
+                    solAmount,
+                    {
+                        ...options,
+                        slippageBasisPoints: options.slippageBasisPoints || 100
+                    }
+                );
+            });
+
+            if (!result?.signature || !result?.mint) {
+                throw new Error('Invalid response from create and buy operation');
             }
 
-            // 5. Save token data
+            // 8. 保存代币信息到数据库
             const tokenData = {
                 mint: result.mint,
                 owner: wallet.publicKey.toString(),
@@ -1793,14 +1716,16 @@ export class SolanaService {
                 creatorPublicKey: wallet.publicKey.toString(),
                 groupType,
                 accountNumber,
-                metadata: metadata,
+                metadata: tokenMetadata,
                 uri: result.metadata?.uri || '',
-                status: 'active'
+                status: 'active',
+                createdAt: new Date(),
+                updatedAt: new Date()
             };
 
             await db.models.Token.create(tokenData);
 
-            // 6. Record transaction
+            // 9. 记录交易
             await db.models.Transaction.create({
                 signature: result.signature,
                 mint: result.mint,
@@ -1810,19 +1735,31 @@ export class SolanaService {
                 status: 'success',
                 raw: {
                     ...result,
-                    metadata,
+                    metadata: tokenMetadata,
                     timestamp: new Date().toISOString()
                 }
             });
 
-            // 7. Setup token tracking
+            // 10. 设置代币追踪
             await this.setupTokenTracking(
                 wallet.publicKey.toString(),
                 result.mint,
                 result.tokenAmount || '0'
             );
 
-            logger.info('Token creation successful:', {
+            // 11. 更新缓存
+            if (this.redis) {
+                const cacheKey = `token:${result.mint}`;
+                await this.redis.set(cacheKey, JSON.stringify({
+                    ...tokenData,
+                    lastUpdate: Date.now()
+                }), 'EX', 3600); // 1小时过期
+            }
+
+            // 12. 初始化 WebSocket 订阅
+            await this.subscribeToTokenBalance(wallet.publicKey, result.mint);
+
+            logger.info('代币创建和购买成功:', {
                 mint: result.mint,
                 signature: result.signature,
                 solAmount: solAmount.toString()
@@ -1834,16 +1771,21 @@ export class SolanaService {
                 mint: result.mint,
                 owner: wallet.publicKey.toString(),
                 solAmount: solAmount.toString(),
-                tokenAmount: result.tokenAmount,
+                tokenAmount: result.tokenAmount || '0',
                 metadata: {
                     name: metadata.name,
                     symbol: metadata.symbol,
                     uri: result.metadata?.uri || ''
+                },
+                transaction: {
+                    signature: result.signature,
+                    timestamp: Date.now(),
+                    confirmations: 1
                 }
             };
 
         } catch (error) {
-            logger.error('Token creation failed:', {
+            logger.error('创建和购买代币失败:', {
                 error: error.message,
                 stack: error.stack,
                 groupType,
@@ -1853,10 +1795,15 @@ export class SolanaService {
                     symbol: metadata.symbol
                 }
             });
+
+            // 更新失败统计
+            if (this.rpcStats) {
+                this.rpcStats.recordFailure(this.connection.rpcEndpoint, error);
+            }
+
             throw error;
         }
     }
-
     // 上传元数据到 IPFS
     async uploadMetadataToIPFS(metadata) {
         try {
@@ -2724,46 +2671,74 @@ export class SolanaService {
     // 新增: 设置代币跟踪（包含缓存和WebSocket）
     async setupTokenTracking(ownerAddress, mintAddress, initialBalance) {
         try {
-            // 1. 设置初始缓存
+            // 1. 设置缓存
             if (this.redis) {
-                const tokenBalanceKey = CACHE_KEYS.TOKEN_BALANCE(ownerAddress, mintAddress);
-                await this.redis.set(tokenBalanceKey, initialBalance, { EX: 60 });
+                const tokenBalanceKey = `token:balance:${ownerAddress}:${mintAddress}`;
+                await this.redis.set(tokenBalanceKey, initialBalance, 'EX', 300); // 5分钟过期
             }
 
-            // 2. 设置 WebSocket 订阅
-            const subscriptionId = await this.setupTokenSubscription(ownerAddress, mintAddress);
+            // 2. 创建 WebSocket 订阅
+            const subscriptionId = await this.wsManager.subscribeToAccount(
+                new PublicKey(mintAddress),
+                async (accountInfo) => {
+                    await this.handleTokenBalanceChange(ownerAddress, mintAddress, accountInfo);
+                }
+            );
 
-            // 3. 验证订阅是否成功
-            if (!subscriptionId) {
-                throw new Error('Failed to setup token subscription');
-            }
-
-            // 4. 添加到活跃订阅列表
-            const subscriptionKey = `${ownerAddress}:${mintAddress}`;
-            this.activeSubscriptions.set(subscriptionKey, {
-                id: subscriptionId,
+            logger.info('代币追踪设置成功:', {
                 owner: ownerAddress,
                 mint: mintAddress,
-                lastUpdate: Date.now()
-            });
-
-            logger.info('代币跟踪设置成功:', {
-                owner: ownerAddress,
-                mint: mintAddress,
-                subscriptionId,
-                initialBalance
+                subscriptionId
             });
 
             return true;
         } catch (error) {
-            logger.error('设置代币跟踪失败:', {
+            logger.error('设置代币追踪失败:', {
                 error: error.message,
                 owner: ownerAddress,
                 mint: mintAddress
             });
+            return false;
+        }
+    }
+    async handleTokenBalanceChange(ownerAddress, mintAddress, accountInfo) {
+        try {
+            // 1. 解析新余额
+            const newBalance = accountInfo.lamports.toString();
 
-            // 5. 重试逻辑
-            return await this.retrySetupTracking(ownerAddress, mintAddress, initialBalance);
+            // 2. 更新缓存
+            if (this.redis) {
+                const tokenBalanceKey = `token:balance:${ownerAddress}:${mintAddress}`;
+                await this.redis.set(tokenBalanceKey, newBalance, 'EX', 300);
+            }
+
+            // 3. 更新数据库
+            await db.models.TokenBalance.upsert({
+                owner: ownerAddress,
+                mint: mintAddress,
+                balance: newBalance,
+                lastUpdate: new Date()
+            });
+
+            // 4. 触发事件通知
+            this.emit('tokenBalanceChange', {
+                owner: ownerAddress,
+                mint: mintAddress,
+                newBalance,
+                timestamp: Date.now()
+            });
+
+            logger.debug('代币余额更新:', {
+                owner: ownerAddress,
+                mint: mintAddress,
+                newBalance
+            });
+        } catch (error) {
+            logger.error('处理代币余额变化失败:', {
+                error: error.message,
+                owner: ownerAddress,
+                mint: mintAddress
+            });
         }
     }
 

@@ -442,37 +442,93 @@ export class CustomPumpSDK extends PumpFunSDK {
 
 // createAndBuy 方法
     // In CustomPumpSDK class (customPumpSDK.js)
+    _convertToBN(value) {
+        try {
+            if (value === null || value === undefined) {
+                throw new Error('Cannot convert null or undefined to BN');
+            }
+
+            if (BN.isBN(value)) {
+                return value;
+            }
+
+            // BigInt 转换
+            if (typeof value === 'bigint') {
+                return new BN(value.toString());
+            }
+
+            // 数字转换
+            if (typeof value === 'number') {
+                if (!Number.isFinite(value)) {
+                    throw new Error('Cannot convert infinite or NaN to BN');
+                }
+                return new BN(Math.floor(value).toString());
+            }
+
+            // 字符串转换
+            if (typeof value === 'string') {
+                // 移除字符串中的空格和逗号
+                const cleanedValue = value.replace(/[\s,]/g, '');
+                if (!/^\d+$/.test(cleanedValue)) {
+                    throw new Error('String contains invalid characters');
+                }
+                return new BN(cleanedValue);
+            }
+
+            throw new Error(`Unsupported value type: ${typeof value}`);
+        } catch (error) {
+            logger.error('BN转换失败:', {
+                error: error.message,
+                value: typeof value === 'bigint' ? value.toString() : value,
+                type: typeof value
+            });
+            throw error;
+        }
+    }
+    _solToLamports(solAmount) {
+        try {
+            // 确保输入是有效数字
+            const amount = Number(solAmount);
+            if (!Number.isFinite(amount)) {
+                throw new Error('Invalid SOL amount');
+            }
+
+            // 转换为 lamports
+            const lamports = Math.floor(amount * LAMPORTS_PER_SOL);
+
+            return this._convertToBN(lamports);
+        } catch (error) {
+            logger.error('SOL转Lamports失败:', {
+                error: error.message,
+                solAmount
+            });
+            throw error;
+        }
+    }
 
     async createAndBuy(creator, mint, metadata, buyAmountSol, options = {}) {
         try {
-            // Validate inputs
+            // 验证输入参数
             if (!creator?.publicKey) throw new Error('Invalid creator wallet');
             if (!mint?.publicKey) throw new Error('Invalid mint keypair');
             if (!metadata?.name || !metadata?.symbol) throw new Error('Invalid metadata');
 
-            logger.info('Starting token creation and purchase:', {
+            logger.info('开始创建和购买代币:', {
                 creator: creator.publicKey.toString(),
                 mint: mint.publicKey.toString(),
-                metadata: {
-                    name: metadata.name,
-                    symbol: metadata.symbol
-                },
-                buyAmount: buyAmountSol.toString()
+                buyAmount: typeof buyAmountSol === 'bigint' ? buyAmountSol.toString() : buyAmountSol
             });
 
-            // 1. Create token metadata
+            // 1. 创建代币元数据
             const tokenMetadata = await this.createTokenMetadata(metadata);
 
-            // 2. Get initial buy amount
-            const buyAmountLamports = BigInt(buyAmountSol.toString());
+            // 2. 转换购买金额为 BN (lamports)
+            const buyAmountLamports = this._solToLamports(buyAmountSol);
 
-            // 3. Get slippage settings
-            const slippageBasisPoints = BigInt(options.slippageBasisPoints || 100);
-
-            // 4. Build and send transaction
+            // 3. 构建交易
             const transaction = new SolanaTransaction();
 
-            // 4.1 Get create instructions
+            // 4. 添加创建指令
             const createIx = await this.getCreateInstructions(
                 creator.publicKey,
                 metadata.name,
@@ -482,26 +538,38 @@ export class CustomPumpSDK extends PumpFunSDK {
             );
             transaction.add(createIx);
 
-            // 4.2 Get buy instructions if amount > 0
-            if (buyAmountLamports > 0n) {
+            // 5. 如果购买金额大于0，添加购买指令
+            if (buyAmountLamports.gt(new BN(0))) {
                 const globalAccount = await this.getGlobalAccount();
-                const buyAmount = globalAccount.getInitialBuyPrice(buyAmountLamports);
-                const buyAmountWithSlippage = this.calculateWithSlippageBuy(
-                    buyAmount,
+
+                // 获取初始购买价格
+                const initialBuyPrice = globalAccount.getInitialBuyPrice(buyAmountLamports);
+
+                // 计算带滑点的金额
+                const slippageBasisPoints = this._convertToBN(options.slippageBasisPoints || 100);
+                const buyAmountWithSlippage = this.calculateSlippage(
+                    initialBuyPrice,
                     slippageBasisPoints
                 );
 
+                // 添加购买指令
                 const buyIx = await this.getBuyInstructions(
                     creator.publicKey,
                     mint.publicKey,
                     globalAccount.feeRecipient,
-                    buyAmount,
+                    initialBuyPrice,
                     buyAmountWithSlippage
                 );
                 transaction.add(buyIx);
+
+                logger.debug('购买指令已添加:', {
+                    initialPrice: initialBuyPrice.toString(),
+                    withSlippage: buyAmountWithSlippage.toString(),
+                    slippage: `${slippageBasisPoints.toString()} basis points`
+                });
             }
 
-            // 5. Send transaction
+            // 6. 获取最新的 blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -509,6 +577,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = creator.publicKey;
 
+            // 7. 发送交易
             const signature = await this.sendTransactionWithLogs(
                 this.connection,
                 transaction,
@@ -521,7 +590,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                 }
             );
 
-            // 6. Get token amount after creation
+            // 8. 获取代币余额
             const tokenAccount = await this.findAssociatedTokenAddress(
                 creator.publicKey,
                 mint.publicKey
@@ -532,10 +601,10 @@ export class CustomPumpSDK extends PumpFunSDK {
                 const balance = await this.connection.getTokenAccountBalance(tokenAccount);
                 tokenAmount = balance.value.amount;
             } catch (error) {
-                logger.warn('Failed to get token balance:', error);
+                logger.warn('获取代币余额失败:', error);
             }
 
-            // 7. Return standardized response
+            // 9. 返回标准化的响应
             const result = {
                 success: true,
                 signature,
@@ -551,7 +620,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                 timestamp: Date.now()
             };
 
-            logger.info('Token creation and purchase successful:', {
+            logger.info('代币创建和购买成功:', {
                 signature,
                 mint: result.mint,
                 tokenAmount
@@ -560,7 +629,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             return result;
 
         } catch (error) {
-            logger.error('Token creation and purchase failed:', {
+            logger.error('代币创建和购买失败:', {
                 error: error.message,
                 stack: error.stack,
                 creator: creator?.publicKey?.toString(),
@@ -571,32 +640,39 @@ export class CustomPumpSDK extends PumpFunSDK {
     }
     async sendTransactionWithLogs(connection, transaction, signers, options) {
         let lastError = null;
-        const maxRetries = options.maxRetries || 5;
+        const maxRetries = options.maxRetries || 3;
 
         for (let attempt = 0; attempt < maxRetries; attempt++) {
             try {
                 logger.info(`尝试发送交易 (${attempt + 1}/${maxRetries})`, {
                     signers: signers.map(s => s.publicKey.toString()),
-                    blockhash: transaction.recentBlockhash,
-                    attempt: attempt + 1
+                    blockhash: transaction.recentBlockhash
                 });
 
-                const signature = await connection.sendTransaction(transaction, signers, {
-                    skipPreflight: options.skipPreflight,
-                    preflightCommitment: options.preflightCommitment,
-                });
+                // 发送交易
+                const signature = await connection.sendTransaction(
+                    transaction,
+                    signers,
+                    {
+                        skipPreflight: options.skipPreflight,
+                        preflightCommitment: options.preflightCommitment
+                    }
+                );
 
                 logger.info(`交易已发送，等待确认... (尝试 ${attempt + 1}/${maxRetries})`, {
                     signature,
                     commitment: options.commitment
                 });
 
-                // 等待交易确认
-                const confirmation = await connection.confirmTransaction({
-                    signature,
-                    blockhash: transaction.recentBlockhash,
-                    lastValidBlockHeight: transaction.lastValidBlockHeight
-                }, options.commitment);
+                // 等待确认
+                const confirmation = await connection.confirmTransaction(
+                    {
+                        signature,
+                        blockhash: transaction.recentBlockhash,
+                        lastValidBlockHeight: transaction.lastValidBlockHeight
+                    },
+                    options.commitment
+                );
 
                 if (confirmation.value.err) {
                     throw new Error(`Transaction failed: ${confirmation.value.err}`);
@@ -604,8 +680,7 @@ export class CustomPumpSDK extends PumpFunSDK {
 
                 logger.info('交易确认成功', {
                     signature,
-                    attempt: attempt + 1,
-                    totalAttempts: maxRetries
+                    attempt: attempt + 1
                 });
 
                 return signature;
@@ -614,8 +689,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                 lastError = error;
                 logger.warn(`交易尝试失败 (${attempt + 1}/${maxRetries})`, {
                     error: error.message,
-                    blockhash: transaction.recentBlockhash,
-                    isLastAttempt: attempt === maxRetries - 1
+                    blockhash: transaction.recentBlockhash
                 });
 
                 if (attempt < maxRetries - 1) {
@@ -625,38 +699,16 @@ export class CustomPumpSDK extends PumpFunSDK {
                     transaction.recentBlockhash = blockhash;
                     transaction.lastValidBlockHeight = lastValidBlockHeight;
 
-                    // 等待一段时间后重试
+                    // 等待后重试
                     await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-                } else {
-                    throw lastError;
                 }
             }
         }
 
         throw lastError;
     }
-    // 使用 BN.js 计算滑点
-    _calculateSlippageBN(amount, basisPoints) {
-        try {
-            const TEN_THOUSAND = new BN(10000);
-
-            // 计算滑点金额
-            const slippageAmount = amount.mul(basisPoints).div(TEN_THOUSAND);
-
-            // 返回带滑点的金额
-            return amount.add(slippageAmount);
-        } catch (error) {
-            logger.error('计算滑点失败:', {
-                error: error.message,
-                amount: amount?.toString(),
-                basisPoints: basisPoints?.toString()
-            });
-            throw new Error(`Failed to calculate slippage: ${error.message}`);
-        }
-    }
-
     // 原来的 BigInt 版本保留作为备用
-    _calculateSlippage(amount, basisPoints) {
+    calculateSlippage(amount, basisPoints) {
         try {
             const amountBN = BigInt(amount.toString());
             const basisPointsBN = BigInt(basisPoints.toString());
@@ -1821,41 +1873,6 @@ validateAndConvertAmount(amount, type = 'buy')
         throw error;
     }
 }
-
-// 修改滑点计算方法
-calculateSlippage(amount, basisPoints)
-{
-    try {
-        // 修改验证逻辑，允许 BigInt 类型
-        const basisPointsNum = Number(basisPoints);
-        if (isNaN(basisPointsNum) || basisPointsNum < 0 || basisPointsNum > 10000) {
-            throw new Error(`Invalid slippage basis points: ${basisPoints}`);
-        }
-
-        // 计算滑点金额
-        const slippageAmount = (BigInt(amount) * BigInt(basisPointsNum)) / BigInt(10000);
-        const finalAmount = BigInt(amount) + slippageAmount;
-
-        logger.debug('📊 滑点计算', {
-            originalAmount: amount.toString(),
-            slippagePercent: `${basisPointsNum / 100}%`,
-            basisPoints: basisPointsNum.toString(),
-            slippageAmount: slippageAmount.toString(),
-            finalAmount: finalAmount.toString()
-        });
-
-        return finalAmount;
-    } catch (error) {
-        logger.error('计算滑点失败', {
-            amount,
-            basisPoints,
-            error: error.message
-        });
-        throw error;
-    }
-}
-
-
 
 // 添加一个辅助方法来等待交易确认
 async waitForTransaction(signature, commitment = 'confirmed', maxRetries = 30)
