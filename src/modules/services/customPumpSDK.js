@@ -332,7 +332,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                 const globalAccount = await this.getGlobalAccount();
 
                 // 使用转换后的 lamports 值
-                const initialBuyPrice = await globalAccount.getInitialBuyPrice(solAmountLamports);
+                const initialBuyPrice = globalAccount.getInitialBuyPrice(solAmountLamports);
                 const slippagePoints = BigInt(options.slippageBasisPoints || 100);
 
                 logger.info('买入参数:', {
@@ -376,185 +376,186 @@ export class CustomPumpSDK extends PumpFunSDK {
     }
 
     // 修改 createAndBuy 方法
+    // 验证指令的工具函数
+    validateInstructions(instructions, logger) {
+        try {
+            // 1. 检查指令数组是否存在
+            if (!Array.isArray(instructions)) {
+                throw new Error('Instructions must be an array');
+            }
+
+            // 2. 检查指令数量
+            if (instructions.length > 12) {
+                throw new Error(`Too many instructions: ${instructions.length}. Maximum allowed is 12.`);
+            }
+
+            // 3. 检查每条指令的数据大小并记录
+            const instructionSizes = instructions.map((ix, index) => {
+                if (!ix || !ix.data) {
+                    throw new Error(`Invalid instruction at index ${index}`);
+                }
+                return {
+                    index,
+                    size: ix.data.length,
+                    programId: ix.programId?.toBase58()
+                };
+            });
+
+            // 4. 创建临时交易来计算总大小
+            const tempTx = new Transaction().add(...instructions);
+            const serializedSize = tempTx.serialize().length;
+
+            // 5. 汇总结果
+            const validationResult = {
+                instructionCount: instructions.length,
+                individualSizes: instructionSizes,
+                totalSerializedSize: serializedSize,
+                isValid: serializedSize <= 1232,
+                warnings: []
+            };
+
+            // 6. 添加警告
+            if (serializedSize > 1000) {
+                validationResult.warnings.push(`Transaction size (${serializedSize} bytes) is close to the limit of 1232 bytes`);
+            }
+
+            // 7. 记录详细信息
+            logger.debug('指令验证结果:', {
+                ...validationResult,
+                details: instructionSizes.map(s => `Instruction ${s.index}: ${s.size} bytes (Program: ${s.programId})`)
+            });
+
+            if (!validationResult.isValid) {
+                throw new Error(`Transaction too large: ${serializedSize} bytes. Maximum allowed is 1232 bytes.`);
+            }
+
+            return validationResult;
+
+        } catch (error) {
+            logger.error('验证指令失败:', {
+                error: error.message,
+                instructionCount: instructions?.length
+            });
+            throw error;
+        }
+    }
+
+// createAndBuy 方法
     async createAndBuy(creator, mint, metadata, buyAmountSol, slippageBasisPoints = 500n, priorityFees) {
         try {
-            // 1. 获取最优 RPC 节点
+            // 1. 参数验证
+            if (!creator?.publicKey) throw new Error('Invalid creator wallet');
+            if (!mint?.publicKey) throw new Error('Invalid mint keypair');
+            if (!metadata?.name || !metadata?.symbol) throw new Error('Invalid metadata');
+
+            logger.info('开始创建和购买代币:', {
+                creator: creator.publicKey.toString(),
+                mint: mint.publicKey.toString(),
+                buyAmount: `${buyAmountSol} SOL`,
+                slippage: `${Number(slippageBasisPoints) / 100}%`
+            });
+
+            // 2. 获取最优 RPC 节点
             const bestEndpoint = await this.solanaService.getBestNode();
             this.connection = new Connection(bestEndpoint, {
                 commitment: 'confirmed',
-                confirmTransactionInitialTimeout: 120000,
+                confirmTransactionInitialTimeout: 60000,
                 wsEndpoint: this.solanaService._getWsEndpoint(bestEndpoint)
             });
 
-            logger.info('使用最优 RPC 节点:', {
-                endpoint: bestEndpoint.replace(/api-key=([^&]+)/, 'api-key=***')
+            // 3. 创建代币元数据
+            const tokenMetadata = await this.createTokenMetadata({
+                name: metadata.name.slice(0, 32),
+                symbol: metadata.symbol.slice(0, 10),
+                description: metadata.description?.slice(0, 200),
+                image: metadata.image
             });
 
-            // 2. 创建代币元数据
-            let tokenMetadata = await this.createTokenMetadata(metadata);
+            // 4. 收集所有指令
+            const instructions = [];
 
-            // 3. 创建代币
-            let transaction = new SolanaTransaction();
-            transaction.add(await this.getCreateInstructions(
+            // 4.1 添加创建指令
+            const createIx = await this.getCreateInstructions(
                 creator.publicKey,
                 metadata.name,
                 metadata.symbol,
                 tokenMetadata.metadataUri,
                 mint
-            ));
+            );
+            instructions.push(createIx);
 
-            // 4. 如果需要购买，添加购买指令
+            // 4.2 如果需要购买，添加购买指令
             if (buyAmountSol > 0) {
-                const globalAccount = await this.getGlobalAccount('confirmed');
-                const buyAmount = await globalAccount.getInitialBuyPrice(BigInt(buyAmountSol));
-
-                // 处理滑点
-                let basisPoints;
-                try {
-                    if (typeof slippageBasisPoints === 'bigint') {
-                        basisPoints = slippageBasisPoints;
-                    } else if (typeof slippageBasisPoints === 'number') {
-                        basisPoints = BigInt(slippageBasisPoints);
-                    } else if (typeof slippageBasisPoints === 'string') {
-                        basisPoints = BigInt(parseInt(slippageBasisPoints));
-                    } else {
-                        basisPoints = BigInt(100); // 默认 1%
-                    }
-                } catch (error) {
-                    logger.warn('转换滑点参数失败，使用默认值:', {
-                        slippageBasisPoints,
-                        error: error.message
-                    });
-                    basisPoints = BigInt(100);
-                }
-
+                const globalAccount = await this.getGlobalAccount('processed');
+                const buyAmount = globalAccount.getInitialBuyPrice(BigInt(buyAmountSol));
                 const buyAmountWithSlippage = this.calculateWithSlippageBuy(
                     buyAmount,
-                    basisPoints
+                    slippageBasisPoints
                 );
 
-                const buyTx = await this.getBuyInstructions(
+                const buyIx = await this.getBuyInstructions(
                     creator.publicKey,
                     mint.publicKey,
                     globalAccount.feeRecipient,
                     buyAmount,
                     buyAmountWithSlippage
                 );
-
-                transaction.add(buyTx);
+                instructions.push(buyIx);
             }
 
-            // 6. 添加优先费用（如果有）
+            // 4.3 如果有优先费用，添加优先费用指令
             if (priorityFees) {
                 const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({
                     microLamports: priorityFees
                 });
-                transaction.instructions.unshift(priorityFeeIx);
+                instructions.unshift(priorityFeeIx);
             }
 
-            // 获取模拟用的 blockhash
-            const { value: { blockhash, lastValidBlockHeight }, context: simulationContext } = 
-                await this.connection.getLatestBlockhashAndContext('processed');
-
-            logger.info('模拟交易使用的区块信息:', {
-                blockhash,
-                lastValidBlockHeight,
-                slot: simulationContext.slot,
-                timestamp: new Date().toISOString()
+            // 5. 验证指令
+            const validation =this.validateInstructions(instructions, logger);
+            logger.info('交易指令验证:', {
+                instructionCount: validation.instructionCount,
+                totalSize: validation.totalSerializedSize,
+                warnings: validation.warnings
             });
 
+            // 6. 获取最新的 blockhash
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('processed');
+
+            // 7. 构建并设置交易
+            const transaction = new Transaction();
+            transaction.add(...instructions);
             transaction.recentBlockhash = blockhash;
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = creator.publicKey;
 
-            // 5. 交易模拟
-            logger.info('开始模拟交易...');
-
-            // 编译消息
-            const messageV0 = transaction.compileMessage();
-
-            // 正确的模拟交易调用
-            const simulation = await this.connection.simulateTransaction(
-                transaction,  // 使用完整的 transaction
-                [creator, mint],  // 需要提供签名者
-                {
-                    sigVerify: true,
-                    replaceRecentBlockhash: true,
-                    commitment: 'processed'
-                }
-            );
-
-            logger.info('交易模拟结果:', {
-                err: simulation.value.err,
-                unitsConsumed: simulation.value.unitsConsumed,
-                logs: simulation.value.logs?.length || 0,
-                timestamp: new Date().toISOString()
+            // 8. 发送交易
+            logger.info('发送交易...', {
+                blockhash,
+                lastValidBlockHeight,
+                feePayer: creator.publicKey.toString()
             });
 
-            // 5.1 检查模拟结果
-            if (simulation.value.err) {
-                throw new Error(`交易模拟失败: ${simulation.value.err}`);
-            }
-
-            // 5.2 检查计算单元
-            const computeUnits = simulation.value.unitsConsumed || 0;
-            logger.info('交易模拟成功:', {
-                computeUnits,
-                logs: simulation.value.logs,
-                timestamp: new Date().toISOString()
-            });
-
-            // 5.3 检查余额
-            const fees = await this.connection.getFeeForMessage(
-                messageV0,
-                'confirmed'
-            );
-
-            const requiredBalance = BigInt(fees.value || 0) + (buyAmountSol);
-            const currentBalance = await this.connection.getBalance(creator.publicKey);
-
-            if (BigInt(currentBalance) < requiredBalance) {
-                throw new Error(`余额不足. 需要: ${requiredBalance}, 当前: ${currentBalance}`);
-            }
-
-
-
-            // 获取实际发送用的新 blockhash
-            const { value: { blockhash: sendBlockhash, lastValidBlockHeight: sendValidHeight }, context: sendContext } = 
-                await this.connection.getLatestBlockhashAndContext('processed');
-
-            logger.info('实际发送交易使用的区块信息:', {
-                blockhash: sendBlockhash,
-                lastValidBlockHeight: sendValidHeight,
-                slot: sendContext.slot,
-                commitment: 'processed',
-                timestamp: new Date().toISOString()
-            });
-
-            transaction.recentBlockhash = sendBlockhash;
-            transaction.lastValidBlockHeight = sendValidHeight -150;
-            transaction.feePayer = creator.publicKey;
-
-            // 发送交易
             const signature = await this.sendTransactionWithLogs(
                 this.connection,
                 transaction,
                 [creator, mint],
                 {
-                    skipPreflight: true,
+                    skipPreflight: false,
                     preflightCommitment: 'processed',
-                    maxRetries: 5,
-                    commitment: 'confirmed'
+                    commitment: 'confirmed',
+                    maxRetries: 3
                 }
             );
 
-            logger.info('交易已发送并确认:', { 
+            logger.info('交易成功:', {
                 signature,
-                endpoint: bestEndpoint.replace(/api-key=([^&]+)/, 'api-key=***')
+                mint: mint.publicKey.toString(),
+                creator: creator.publicKey.toString()
             });
 
-            // 不再需要单独的确认步骤，因为 sendAndConfirmTransaction 已经包含了确认
-            
+            // 9. 返回结果
             return {
                 signature,
                 mint: mint.publicKey,
@@ -567,10 +568,12 @@ export class CustomPumpSDK extends PumpFunSDK {
 
         } catch (error) {
             // 更新节点统计信息
-            this.solanaService.updateNodeStats(this.currentEndpoint, {
-                success: false,
-                error: error.message
-            });
+            if (this.solanaService) {
+                this.solanaService.updateNodeStats(this.connection.rpcEndpoint, {
+                    success: false,
+                    error: error.message
+                });
+            }
 
             logger.error('创建代币失败:', {
                 error: error.message,
@@ -579,8 +582,10 @@ export class CustomPumpSDK extends PumpFunSDK {
                 metadata: {
                     name: metadata?.name,
                     symbol: metadata?.symbol
-                }
+                },
+                stack: error.stack
             });
+
             throw error;
         }
     }
