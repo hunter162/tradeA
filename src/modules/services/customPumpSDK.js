@@ -562,7 +562,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             transaction.add(createIx);
 
             // 5. 如果购买金额大于0，添加购买指令
-            if (buyAmountLamports.gt(new BN(0))) {
+            if (buyAmountLamports>=(new BN(0))) {
                 const globalAccount = await this.getGlobalAccount();
 
                 // 确保使用 BigInt 进行价格计算
