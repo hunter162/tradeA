@@ -58,73 +58,150 @@ const CACHE_KEYS = {
 
 export class SolanaService {
     constructor(config) {
-        // 初始化 RPC 节点池
-        this.endpoints = process.env.SOLANA_RPC_ENDPOINTS
-            ? JSON.parse(process.env.SOLANA_RPC_ENDPOINTS)
-            : ['https://api.mainnet-beta.solana.com'];
+        try {
+            // 1. 初始化 RPC 节点池
+            this.endpoints = process.env.SOLANA_RPC_ENDPOINTS
+                ? JSON.parse(process.env.SOLANA_RPC_ENDPOINTS)
+                : ['https://api.mainnet-beta.solana.com'];
 
-        // 记录节点状态
-        this.nodeStats = new Map(this.endpoints.map(endpoint => [
-            endpoint,
-            {
-                latency: 0,
-                successRate: 1,
+            // 验证所有端点
+            this.endpoints = this.endpoints.map(endpoint => {
+                if (!endpoint.startsWith('http://') && !endpoint.startsWith('https://')) {
+                    throw new Error(`Invalid endpoint URL: ${endpoint}`);
+                }
+                return endpoint;
+            });
+
+            // 2. 记录节点状态
+            this.nodeStats = new Map(this.endpoints.map(endpoint => [
+                endpoint,
+                {
+                    latency: 0,
+                    successRate: 1,
+                    errorCount: 0,
+                    lastCheck: Date.now(),
+                    lastError: null,
+                    lastSuccess: null
+                }
+            ]));
+
+            // 3. 初始化节点管理
+            this.currentEndpoint = this.endpoints[0];
+            this.usedEndpoints = new Set();
+            this.availableEndpoints = [...this.endpoints];
+            this.retryCount = 0;
+            this.maxRetries = config?.maxRetries || 3;
+
+            // 4. 创建初始连接
+            this.connection = new Connection(this.currentEndpoint, {
+                commitment: "confirmed",
+                confirmTransactionInitialTimeout: config?.confirmTimeout || 60000,
+                wsEndpoint: this._getWsEndpoint(this.currentEndpoint)
+            });
+
+            // 5. 创建 WebSocket 管理器
+            this.wsManager = new WebSocketManager(this.currentEndpoint);
+
+            // 6. 初始化基础服务
+            this.sdk = null;
+            this.walletService = null;
+            this.redis = null;
+            this.tokenSubscriptionService = null;
+            this.pinataService = null;
+            this.provider = null;
+
+            // 7. 设置订阅管理
+            this.subscriptions = new Map();
+            this.activeSubscriptions = new Map();
+
+            // 8. 配置健康检查参数
+            this.lastHealthCheck = 0;
+            this.healthCheckInterval = config?.healthCheckInterval || 30000; // 30 秒检查一次
+            this.timeoutSettings = {
+                requestTimeout: config?.requestTimeout || 10000,     // 单次请求超时：10秒
+                confirmTimeout: config?.confirmTimeout || 30000,     // 交易确认超时：30秒
+                retryDelay: config?.retryDelay || 1000              // 重试延迟：1秒
+            };
+
+            // 9. 创建端点性能统计
+            this.endpointStats = new Map(this.endpoints.map(endpoint => [endpoint, {
+                successCount: 0,
                 errorCount: 0,
-                lastCheck: Date.now()
-            }
-        ]));
+                lastError: null,
+                lastSuccess: null,
+                avgLatency: 0,
+                isRateLimited: false,
+                lastUpdate: Date.now()
+            }]));
 
-        // 初始化连接
-        this.currentEndpoint = this.endpoints[0];
-        this.connection = new Connection(this.currentEndpoint);
+            // 10. 设置默认配置
+            this.defaultConfig = {
+                commitment: "confirmed",
+                preflightCommitment: "confirmed",
+                skipPreflight: false,
+                maxRetries: 3,
+                minContextSlot: 0
+            };
 
-        logger.info('初始化 Solana RPC 节点池:', {
-            totalEndpoints: this.endpoints.length,
-            currentEndpoint: this.currentEndpoint.replace(/api-key=([^&]+)/, 'api-key=***')
-        });
+            // 11. 初始化缓存键
+            this.CACHE_KEYS = {
+                BALANCE_SOL: (pubkey) => `balance:sol:${pubkey}`,
+                TOKEN_BALANCE: (pubkey, mint) => `balance:token:${pubkey}:${mint}`,
+                TOKEN_METADATA: (mint) => `token:metadata:${mint}`,
+                TRANSACTION: (signature) => `tx:${signature}`
+            };
 
-        // 创建 WebSocket 管理器
-        this.wsManager = new WebSocketManager(this.currentEndpoint);
+            // 12. 记录初始化信息
+            logger.info('初始化 Solana 服务:', {
+                totalEndpoints: this.endpoints.length,
+                currentEndpoint: this.currentEndpoint.replace(/api-key=([^&]+)/, 'api-key=***'),
+                wsEnabled: !!this.wsManager,
+                timeoutSettings: this.timeoutSettings,
+                defaultCommitment: this.defaultConfig.commitment
+            });
 
-        // 其他初始化...
-        this.sdk = null;
-        this.walletService = null;
-        this.redis = null;
-        this.tokenSubscriptionService = null;
+        } catch (error) {
+            logger.error('Solana 服务初始化失败:', {
+                error: error.message,
+                stack: error.stack
+            });
+            throw error;
+        }
 
-        // 记录每个节点的状态
-        this.endpointStats = new Map(this.endpoints.map(endpoint => [endpoint, {
-            successCount: 0,
-            errorCount: 0,
-            lastError: null,
-            lastSuccess: null,
-            avgLatency: 0,
-            isRateLimited: false
-        }]));
-
-        this.subscriptions = new Map();
-        this.retryCount = 0;
-        this.maxRetries = 3;
-        this.rpcStats = new Map();
-        this.lastHealthCheck = 0;
-        this.healthCheckInterval = 30000; // 30秒检查一次
-
-        // 调整超时设置
-        this.timeoutSettings = {
-            requestTimeout: 10000,     // 单次请求超时：10秒
-            confirmTimeout: 30000,     // 交易确认超时：30秒
-            retryDelay: 1000          // 重试延迟：1秒
-        };
-
-        logger.info('初始化 Solana 服务:', {
-            totalEndpoints: this.endpoints.length,
-            currentEndpoint: this.currentEndpoint.replace(/api-key=([^&]+)/, 'api-key=***')
-        });
-
-        // 保存活跃订阅
-        this.activeSubscriptions = new Map();
+        // 13. 设置自动清理间隔
+        setInterval(() => {
+            this.cleanupStaleSubscriptions();
+        }, 300000); // 每5分钟清理一次过期订阅
     }
+    async cleanupStaleSubscriptions() {
+        try {
+            const now = Date.now();
+            const staleTimeout = 3600000; // 1小时
 
+            for (const [key, subscription] of this.activeSubscriptions) {
+                if (now - subscription.lastUpdate > staleTimeout) {
+                    try {
+                        await this.wsManager.unsubscribeFromAccount(subscription.id);
+                        this.activeSubscriptions.delete(key);
+                        logger.debug('清理过期订阅:', { key });
+                    } catch (error) {
+                        logger.warn('清理订阅失败:', {
+                            key,
+                            error: error.message
+                        });
+                    }
+                }
+            }
+
+            logger.debug('订阅清理完成:', {
+                activeCount: this.activeSubscriptions.size
+            });
+        } catch (error) {
+            logger.error('清理过期订阅失败:', {
+                error: error.message
+            });
+        }
+    }
     _getWsEndpoint(httpEndpoint) {
         try {
             if (!httpEndpoint) {
@@ -277,27 +354,28 @@ export class SolanaService {
         return bestEndpoint;
     }
 
-    async createConnection() {
-            try {
-                this.connection = new Connection(endpoint || this.currentEndpoint, {
-                    commitment: 'confirmed',
-                    confirmTransactionInitialTimeout: 60000,
-                    wsEndpoint: this._getWsEndpoint(endpoint || this.currentEndpoint)
-                });
+    async createConnection(endpoint) {
+        try {
+            const rpcEndpoint = endpoint || this.currentEndpoint;
+            this.connection = new Connection(rpcEndpoint, {
+                commitment: 'confirmed',
+                confirmTransactionInitialTimeout: 60000,
+                wsEndpoint: this._getWsEndpoint(rpcEndpoint)
+            });
 
-                logger.info('创建新的 RPC 连接:', {
-                    endpoint: (endpoint || this.currentEndpoint).replace(/api-key=([^&]+)/, 'api-key=***'),
-                    timeout: 60000
-                });
+            logger.info('创建新的 RPC 连接:', {
+                endpoint: rpcEndpoint.replace(/api-key=([^&]+)/, 'api-key=***'),
+                timeout: 60000
+            });
 
-                return true;
-            } catch (error) {
-                logger.error('创建 RPC 连接失败:', {
-                    error: error.message,
-                    endpoint: (endpoint || this.currentEndpoint).replace(/api-key=([^&]+)/, 'api-key=***')
-                });
-                throw error;
-            }
+            return true;
+        } catch (error) {
+            logger.error('创建 RPC 连接失败:', {
+                error: error.message,
+                endpoint: (endpoint || this.currentEndpoint).replace(/api-key=([^&]+)/, 'api-key=***')
+            });
+            throw error;
+        }
     }
 
     async testConnection() {
@@ -995,7 +1073,6 @@ export class SolanaService {
             // 选择当前节点之外延迟最低的节点
             const nextRpc = availableRpcs.find(r => r.endpoint !== this.currentEndpoint) || availableRpcs[0];
 
-            // 使用 createConnection 而不是 initializeConnection
             await this.createConnection(nextRpc.endpoint);
             this.currentEndpoint = nextRpc.endpoint;
 
@@ -1009,7 +1086,7 @@ export class SolanaService {
         } catch (error) {
             logger.error('切换 RPC 节点失败:', {
                 error: error.message,
-                currentEndpoint: this.currentEndpoint
+                currentEndpoint: this.currentEndpoint?.replace(/api-key=([^&]+)/, 'api-key=***')
             });
             throw error;
         }
@@ -1035,12 +1112,20 @@ export class SolanaService {
                 });
 
                 if (attempt < maxRetries - 1) {
-                    // 切换节点
-                    await this.switchRpcEndpoint();
-                    // 指数退避等待
-                    await new Promise(resolve =>
-                        setTimeout(resolve, Math.pow(2, attempt) * 1000)
-                    );
+                    try {
+                        // 切换节点
+                        await this.switchRpcEndpoint();
+                        // 指数退避等待
+                        await new Promise(resolve =>
+                            setTimeout(resolve, Math.pow(2, attempt) * 1000)
+                        );
+                    } catch (switchError) {
+                        logger.error('切换节点失败:', {
+                            error: switchError.message,
+                            attempt: attempt + 1
+                        });
+                        // 继续使用当前节点
+                    }
                 }
             }
         }
@@ -1807,9 +1892,10 @@ export class SolanaService {
             });
 
             // 更新失败统计
-            if (this.rpcStats) {
-                this.rpcStats.recordFailure(this.connection.rpcEndpoint, error);
-            }
+            this.updateNodeStats(this.connection.rpcEndpoint, {
+                success: false,
+                error: error.message
+            });
 
             throw error;
         }
