@@ -194,18 +194,13 @@ export class TokenTradeService {
     }
 
     // In TokenTradeService class (tokenTradeService.js)
-    // In TokenTradeService class (tokenTradeService.js)
+// In TokenTradeService class (tokenTradeService.js)
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         try {
-            // 1. 获取钱包
-            const wallet = await this.solanaService.walletService.getWallet(groupType, accountNumber);
-            if (!wallet) {
+            // 1. 获取钱包 Keypair (使用 getWalletKeypair 而不是 getWallet)
+            const keypair = await this.solanaService.walletService.getWalletKeypair(groupType, accountNumber);
+            if (!keypair) {
                 throw new Error('Wallet not found');
-            }
-
-            // 1.1 验证钱包数据
-            if (!wallet.secretKey && !wallet.privateKey) {
-                throw new Error('Invalid wallet data: missing private key');
             }
 
             // 2. 获取代币信息并执行验证
@@ -214,35 +209,23 @@ export class TokenTradeService {
                 throw new Error(`Token ${tokenAddress} not found`);
             }
 
-            // 3. 从钱包数据创建 Keypair
-            let keypair;
-            try {
-                if (wallet.secretKey) {
-                    // 如果是 Uint8Array 格式
-                    keypair = Keypair.fromSecretKey(
-                        wallet.secretKey instanceof Uint8Array ?
-                            wallet.secretKey :
-                            new Uint8Array(wallet.secretKey)
-                    );
-                } else if (wallet.privateKey) {
-                    // 如果是 base64 格式的私钥
-                    const privateKeyBuffer = Buffer.from(wallet.privateKey, 'base64');
-                    keypair = Keypair.fromSecretKey(new Uint8Array(privateKeyBuffer));
-                } else {
-                    throw new Error('No valid private key format found');
-                }
+            // 3. 计算卖出数量
+            const tokenBalance = await this.solanaService.getTokenBalance(
+                keypair.publicKey.toString(),
+                tokenAddress
+            );
+            const sellAmount = BigInt(Math.floor(Number(tokenBalance) * (percentage / 100)));
 
-                // 验证生成的 keypair
-                if (!keypair.publicKey.equals(new PublicKey(wallet.publicKey))) {
-                    throw new Error('Generated keypair does not match wallet public key');
-                }
-            } catch (error) {
-                logger.error('创建 Keypair 失败:', {
-                    error: error.message,
-                    walletPublicKey: wallet.publicKey
-                });
-                throw new Error(`Failed to create keypair: ${error.message}`);
+            if (sellAmount <= 0n) {
+                throw new Error('Invalid sell amount');
             }
+
+            logger.info('开始卖出代币:', {
+                wallet: keypair.publicKey.toString(),
+                token: tokenAddress,
+                amount: sellAmount.toString(),
+                percentage: `${percentage}%`
+            });
 
             // 4. 创建对应的 Provider
             const provider = new AnchorProvider(
@@ -255,32 +238,17 @@ export class TokenTradeService {
                 }
             );
 
-            // 5. 计算卖出数量
-            const tokenBalance = await this.solanaService.getTokenBalance(wallet.publicKey, tokenAddress);
-            const sellAmount = BigInt(Math.floor(Number(tokenBalance) * (percentage / 100)));
-
-            if (sellAmount <= 0n) {
-                throw new Error('Invalid sell amount');
-            }
-
-            logger.info('开始卖出代币:', {
-                wallet: wallet.publicKey,
-                token: tokenAddress,
-                amount: sellAmount.toString(),
-                percentage: `${percentage}%`
-            });
-
-            // 6. 创建 CustomPumpSDK 实例
+            // 5. 创建 CustomPumpSDK 实例
             const sdk = new CustomPumpSDK(provider);
             sdk.setSolanaService(this.solanaService);
 
-            // 7. 准备优先费用选项
+            // 6. 准备优先费用选项
             const priorityFees = options.usePriorityFee ? {
-                microLamports: options.microLamports, // 使用 microLamports 替代 tipAmountSol
+                microLamports: options.microLamports,
                 type: options.priorityType || 'default'
             } : undefined;
 
-            // 8. 执行卖出操作
+            // 7. 执行卖出操作
             const result = await sdk.sell(
                 keypair,
                 new PublicKey(tokenAddress),
@@ -294,11 +262,11 @@ export class TokenTradeService {
                 }
             );
 
-            // 9. 保存交易记录
+            // 8. 保存交易记录
             await this.saveTradeTransaction({
                 signature: result.signature,
                 mint: tokenAddress,
-                owner: wallet.publicKey,
+                owner: keypair.publicKey.toString(),
                 type: 'sell',
                 amount: sellAmount.toString(),
                 metadata: {
