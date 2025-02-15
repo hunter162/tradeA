@@ -194,6 +194,7 @@ export class TokenTradeService {
     }
 
     // In TokenTradeService class (tokenTradeService.js)
+    // In TokenTradeService class (tokenTradeService.js)
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         try {
             // 1. 获取钱包
@@ -202,16 +203,46 @@ export class TokenTradeService {
                 throw new Error('Wallet not found');
             }
 
+            // 1.1 验证钱包数据
+            if (!wallet.secretKey && !wallet.privateKey) {
+                throw new Error('Invalid wallet data: missing private key');
+            }
+
             // 2. 获取代币信息并执行验证
             const tokenInfo = await this.getTokenInfo(tokenAddress);
             if (!tokenInfo) {
                 throw new Error(`Token ${tokenAddress} not found`);
             }
 
-            // 3. 从 base64 私钥创建 Keypair
-            const keypair = Keypair.fromSecretKey(
-                Buffer.from(wallet.privateKey, 'base64')
-            );
+            // 3. 从钱包数据创建 Keypair
+            let keypair;
+            try {
+                if (wallet.secretKey) {
+                    // 如果是 Uint8Array 格式
+                    keypair = Keypair.fromSecretKey(
+                        wallet.secretKey instanceof Uint8Array ?
+                            wallet.secretKey :
+                            new Uint8Array(wallet.secretKey)
+                    );
+                } else if (wallet.privateKey) {
+                    // 如果是 base64 格式的私钥
+                    const privateKeyBuffer = Buffer.from(wallet.privateKey, 'base64');
+                    keypair = Keypair.fromSecretKey(new Uint8Array(privateKeyBuffer));
+                } else {
+                    throw new Error('No valid private key format found');
+                }
+
+                // 验证生成的 keypair
+                if (!keypair.publicKey.equals(new PublicKey(wallet.publicKey))) {
+                    throw new Error('Generated keypair does not match wallet public key');
+                }
+            } catch (error) {
+                logger.error('创建 Keypair 失败:', {
+                    error: error.message,
+                    walletPublicKey: wallet.publicKey
+                });
+                throw new Error(`Failed to create keypair: ${error.message}`);
+            }
 
             // 4. 创建对应的 Provider
             const provider = new AnchorProvider(
