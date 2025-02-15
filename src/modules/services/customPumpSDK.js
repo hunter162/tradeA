@@ -1510,14 +1510,19 @@ async sell(
 )
 {
     try {
+        const mintPubkey = mint instanceof PublicKey ? mint : new PublicKey(mint);
+        const tokenAmount = BigInt(sellTokenAmount.toString());
+        const slippage = BigInt(slippageBasisPoints.toString());
+
+
         // 1. 使用 withRetry 包装主要操作以实现 RPC 优选
         return await this.withRetry(async () => {
             // 2. 获取卖出指令
             let sellTx = await super.getSellInstructionsByTokenAmount(
                 seller.publicKey,
-                mint,
-                sellTokenAmount,
-                slippageBasisPoints,
+                mintPubkey,
+                tokenAmount,
+                slippage,
                 'confirmed'
             );
 
