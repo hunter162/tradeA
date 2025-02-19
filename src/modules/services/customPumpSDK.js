@@ -1840,72 +1840,106 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const programId = new PublicKey(this.PROGRAM_ID);
             const mintPubkey = new PublicKey(tokenMint);
 
-            logger.info('开始卖出代币:', {
+            logger.info('开始卖出交易:', {
                 seller: seller.publicKey.toString(),
                 mint: mintPubkey.toString(),
                 amount: amount.toString()
             });
 
-            try {
-                // 2. 查找 PDA，使用正确的 programId
-                const [globalAddress] = PublicKey.findProgramAddressSync(
-                    [Buffer.from('global')],
-                    programId  // 使用转换后的 programId
-                );
+            // 2. 创建交易
+            const transaction = new Transaction();
 
-                const [bondingCurveAddress] = PublicKey.findProgramAddressSync(
-                    [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
-                    programId  // 使用转换后的 programId
-                );
+            // 3. 查找 PDA
+            const [globalAddress] = PublicKey.findProgramAddressSync(
+                [Buffer.from('global')],
+                programId
+            );
 
-                // 其余代码保持不变...
-                const associatedTokenAddress = await getAssociatedTokenAddress(
-                    mintPubkey,
-                    seller.publicKey
-                );
+            const [bondingCurveAddress] = PublicKey.findProgramAddressSync(
+                [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
+                programId
+            );
 
-                // 4. 检查代币余额
-                const tokenBalance = await this.connection.getTokenAccountBalance(associatedTokenAddress);
-                if (!tokenBalance?.value?.amount || BigInt(tokenBalance.value.amount) < BigInt(amount)) {
-                    throw new Error(`Insufficient token balance. Required: ${amount.toString()}, Available: ${tokenBalance?.value?.amount || '0'}`);
+            // 4. 获取代币账户
+            const associatedTokenAddress = await getAssociatedTokenAddress(
+                mintPubkey,
+                seller.publicKey
+            );
+
+            // 5. 创建卖出指令
+            const sellInstruction = {
+                programId: programId,
+                keys: [
+                    { pubkey: globalAddress, isSigner: false, isWritable: false },
+                    { pubkey: globalAddress, isSigner: false, isWritable: true }, // feeRecipient
+                    { pubkey: mintPubkey, isSigner: false, isWritable: true },
+                    { pubkey: bondingCurveAddress, isSigner: false, isWritable: true },
+                    { pubkey: associatedTokenAddress, isSigner: false, isWritable: true },
+                    { pubkey: seller.publicKey, isSigner: true, isWritable: true },
+                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                    { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+                ],
+                data: Buffer.from([
+                    ...new Uint8Array([51, 230, 133, 164, 1, 127, 131, 173]), // sell discriminator
+                    ...new BN(amount.toString()).toArray('le', 8),
+                    ...new BN(0).toArray('le', 8) // minSolOutput
+                ])
+            };
+
+            // 6. 添加指令到交易
+            transaction.add(sellInstruction);
+
+            // 7. 获取最新的区块哈希
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('confirmed');
+
+            transaction.recentBlockhash = blockhash;
+            transaction.lastValidBlockHeight = lastValidBlockHeight;
+            transaction.feePayer = seller.publicKey;
+
+            // 8. 发送并确认交易
+            const signature = await sendAndConfirmTransaction(
+                this.connection,
+                transaction,
+                [seller],
+                {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                    commitment: 'confirmed',
+                    maxRetries: 5
                 }
+            );
 
-                // 5. 创建销售指令
-                const sellInstruction = {
-                    programId: programId, // 使用转换后的 programId
-                    keys: [
-                        { pubkey: globalAddress, isSigner: false, isWritable: false },
-                        { pubkey: globalAddress, isSigner: false, isWritable: true }, // feeRecipient
-                        { pubkey: mintPubkey, isSigner: false, isWritable: true },
-                        { pubkey: bondingCurveAddress, isSigner: false, isWritable: true },
-                        { pubkey: associatedTokenAddress, isSigner: false, isWritable: true },
-                        { pubkey: seller.publicKey, isSigner: true, isWritable: true },
-                        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
-                    ],
-                    data: Buffer.from([
-                        ...new Uint8Array([51, 230, 133, 164, 1, 127, 131, 173]), // sell discriminator
-                        ...new BN(amount.toString()).toArray('le', 8),
-                        ...new BN(0).toArray('le', 8) // minSolOutput
-                    ])
-                };
+            // 等待交易确认
+            await this.connection.confirmTransaction({
+                signature,
+                blockhash,
+                lastValidBlockHeight
+            });
 
-                // 其余代码保持不变...
-            } catch (innerError) {
-                logger.error('交易执行失败:', {
-                    error: innerError.message,
-                    stack: innerError.stack
-                });
-                throw innerError;
-            }
+            logger.info('卖出交易成功:', {
+                signature,
+                seller: seller.publicKey.toString(),
+                amount: amount.toString()
+            });
+
+            // 9. 返回结果（包含必要的信息）
+            return {
+                success: true,
+                signature,
+                amount: amount.toString(),
+                mint: mintPubkey.toString(),
+                owner: seller.publicKey.toString()
+            };
+
         } catch (error) {
-            logger.error('卖出代币失败:', {
+            logger.error('卖出交易失败:', {
                 error: error.message,
-                stack: error.stack,
                 seller: seller?.publicKey?.toString(),
-                mint: tokenMint?.toString(),
-                amount: amount?.toString()
+                mint: tokenMint,
+                amount: amount?.toString(),
+                stack: error.stack
             });
             throw error;
         }
