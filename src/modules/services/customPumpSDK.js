@@ -36,7 +36,10 @@ import {SolanaService} from './solanaService.js';
 import {sendAndConfirmTransaction} from '@solana/web3.js';
 import idlModule from 'pumpdotfun-sdk/dist/cjs/IDL/index.js';
 const { IDL } = idlModule;
-
+const ACCOUNT_SIZES = {
+    BondingCurve: 128,  // 8字节对齐的账户大小
+    Global: 128        // 8字节对齐的账户大小
+};
 // 修改常量设置
 const MIN_COMPUTE_UNITS = 200_000;  // 保持计算单元不变
 const BASE_PRIORITY_RATE = 1;       // 每个计算单元 1 microLamport
@@ -209,27 +212,41 @@ export class CustomPumpSDK extends PumpFunSDK {
         this.ASSOCIATED_TOKEN_PROGRAM_ID = ASSOCIATED_TOKEN_PROGRAM_ID;
         this.PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
     }
-    /**
-     * Creates a program instance
-     * @param {import('@coral-xyz/anchor').Provider} provider
-     * @returns {import('@coral-xyz/anchor').Program<import('pumpdotfun-sdk').PumpFun>}
-     */
+    // 在 CustomPumpSDK 类顶部添加账户大小定义
+
+
+// 修改 createProgram 方法
     createProgram(provider) {
         if (!provider) {
-            throw new Error('Provider is required to create program');
+            throw new Error('Provider is required');
         }
 
         try {
-            // 创建程序实例，直接使用原始 IDL，因为账户已经存在
+            if (!this._coder) {
+                this._coder = new BorshCoder(IDL);
+            }
+
+            // 确保 IDL 的 accounts 包含 size 信息
+            const accountsWithSize = IDL.accounts.map(account => ({
+                ...account,
+                size: ACCOUNT_SIZES[account.name]
+            }));
+
+            // 创建程序实例
             const program = new Program(
-                IDL,
+                {
+                    ...IDL,
+                    accounts: accountsWithSize
+                },
                 this.PROGRAM_ID,
-                provider
+                provider,
+                this._coder
             );
 
             logger.info('Program created successfully:', {
                 programId: this.PROGRAM_ID,
-                provider: provider.wallet.publicKey.toString()
+                provider: provider.wallet.publicKey.toString(),
+                hasAccounts: !!program.account
             });
 
             return program;
