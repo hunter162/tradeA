@@ -143,7 +143,7 @@ export class CustomPumpSDK extends PumpFunSDK {
         );
         const tempKeypair = Keypair.generate();
         const wallet = new CustomWallet(tempKeypair);
-
+        console.log('Current IDL:', JSON.stringify(IDL, null, 2));
         // 创建 coder
         const coder = new BorshCoder(IDL);
 
