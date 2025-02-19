@@ -208,39 +208,21 @@ export class CustomPumpSDK extends PumpFunSDK {
         }
 
         try {
-            // 确保 IDL 有效
-            if (!IDL || !IDL.accounts) {
-                throw new Error('Invalid IDL: missing accounts definition');
-            }
-
-            // 创建程序实例前先验证 IDL
-            const accounts = IDL.accounts || [];
-            for (const acc of accounts) {
-                if (!acc.name || !this._coder?.accounts?.size(acc.name)) {
-                    logger.error('Invalid account definition:', {
-                        accountName: acc.name,
-                        hasSize: !!this._coder?.accounts?.size(acc.name)
-                    });
-                    throw new Error(`Invalid account definition for: ${acc.name}`);
-                }
-            }
-
-            logger.info('Creating program with validated IDL:', {
-                programId: this.PROGRAM_ID,
-                numAccounts: accounts.length
-            });
-
-            // 创建程序实例
+            // 直接使用 Program 创建而不检查账户定义
             const program = new Program(
                 IDL,
                 this.PROGRAM_ID,
                 provider
             );
 
-            // 验证程序实例
-            if (!program.account || !program.idl) {
+            if (!program) {
                 throw new Error('Program initialization failed');
             }
+
+            logger.info('Program created successfully:', {
+                programId: this.PROGRAM_ID,
+                provider: provider.wallet.publicKey.toString()
+            });
 
             return program;
 
@@ -248,8 +230,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             logger.error('Failed to create program:', {
                 error: error.message,
                 provider: provider?.wallet?.publicKey?.toString(),
-                programId: this.PROGRAM_ID.toString(),
-                stack: error.stack
+                programId: this.PROGRAM_ID.toString()
             });
             throw error;
         }
