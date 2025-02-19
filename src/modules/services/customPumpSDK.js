@@ -1942,7 +1942,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             // 9. 获取最新的块哈希
             const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
+                await this.connection.getLatestBlockhash('processed');
 
             transaction.recentBlockhash = blockhash;
             transaction.lastValidBlockHeight = lastValidBlockHeight;
@@ -1958,7 +1958,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 {
                     skipPreflight: true,
                     commitment: 'confirmed',
-                    maxRetries: 3
+                    maxRetries: 5
                 }
             );
 
