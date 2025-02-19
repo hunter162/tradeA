@@ -220,45 +220,16 @@ export class CustomPumpSDK extends PumpFunSDK {
         }
 
         try {
-            // 确保 coder 已初始化
-            if (!this._coder) {
-                this._coder = new BorshCoder(IDL);
-            }
-
-            // 验证 coder
-            if (!this._coder.accounts) {
-                logger.error('Coder validation failed:', {
-                    hasCoder: !!this._coder,
-                    hasAccounts: !!this._coder?.accounts,
-                    idlAccounts: IDL.accounts?.length
-                });
-                throw new Error('Invalid coder: missing accounts encoder');
-            }
-
-            logger.debug('Creating program with coder:', {
-                programId: this.PROGRAM_ID,
-                hasAccounts: !!this._coder.accounts,
-                accountsCount: IDL.accounts?.length,
-                provider: provider.wallet.publicKey.toString()
-            });
-
-            // 创建程序实例
+            // 创建程序实例，直接使用原始 IDL，因为账户已经存在
             const program = new Program(
                 IDL,
                 this.PROGRAM_ID,
-                provider,
-                this._coder  // 显式传递 coder
+                provider
             );
-
-            // 验证程序创建结果
-            if (!program || !program.account) {
-                throw new Error('Program initialization failed: invalid program instance');
-            }
 
             logger.info('Program created successfully:', {
                 programId: this.PROGRAM_ID,
-                provider: provider.wallet.publicKey.toString(),
-                hasAccounts: !!program.account
+                provider: provider.wallet.publicKey.toString()
             });
 
             return program;
@@ -267,9 +238,6 @@ export class CustomPumpSDK extends PumpFunSDK {
             logger.error('Failed to create program:', {
                 error: error.message,
                 provider: provider?.wallet?.publicKey?.toString(),
-                programId: this.PROGRAM_ID.toString(),
-                hasIDL: !!IDL,
-                hasAccounts: !!IDL.accounts,
                 stack: error.stack
             });
             throw error;
@@ -1639,21 +1607,15 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 }
     async initializeProvider(seller) {
         try {
-            if (!seller) {
-                throw new Error('Seller is required for provider initialization');
+            if (!seller || !seller.publicKey) {
+                throw new Error('Valid seller is required');
             }
 
-            // 验证 seller 的有效性
-            if (!seller.publicKey) {
-                throw new Error('Invalid seller: missing public key');
-            }
-
-            // 如果已经有有效的 provider 和 program，直接返回
+            // 如果已经初始化，直接返回
             if (this.provider?.program && this.program) {
                 return;
             }
 
-            // 创建新的 provider
             const provider = new AnchorProvider(
                 this.connection,
                 new CustomWallet(seller),
@@ -1664,33 +1626,15 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             );
 
-            // 验证 provider
-            if (!provider.wallet || !provider.connection) {
-                throw new Error('Provider initialization failed: missing wallet or connection');
-            }
-
-            // 创建程序实例
             const program = this.createProgram(provider);
 
-            // 验证程序创建结果
-            if (!program || !program.account) {
-                throw new Error('Program initialization failed: invalid program instance');
-            }
-
-            // 设置 provider 和 program
             this.provider = provider;
             this.program = program;
-
-            logger.info('Provider and program initialized successfully:', {
-                wallet: provider.wallet.publicKey.toString(),
-                programId: program.programId.toString()
-            });
 
         } catch (error) {
             logger.error('Provider initialization failed:', {
                 error: error.message,
-                seller: seller?.publicKey?.toString(),
-                stack: error.stack
+                seller: seller?.publicKey?.toString()
             });
             throw error;
         }
