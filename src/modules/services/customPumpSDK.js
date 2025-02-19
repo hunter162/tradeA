@@ -208,16 +208,48 @@ export class CustomPumpSDK extends PumpFunSDK {
         }
 
         try {
-            return new Program(
+            // 确保 IDL 有效
+            if (!IDL || !IDL.accounts) {
+                throw new Error('Invalid IDL: missing accounts definition');
+            }
+
+            // 创建程序实例前先验证 IDL
+            const accounts = IDL.accounts || [];
+            for (const acc of accounts) {
+                if (!acc.name || !this._coder?.accounts?.size(acc.name)) {
+                    logger.error('Invalid account definition:', {
+                        accountName: acc.name,
+                        hasSize: !!this._coder?.accounts?.size(acc.name)
+                    });
+                    throw new Error(`Invalid account definition for: ${acc.name}`);
+                }
+            }
+
+            logger.info('Creating program with validated IDL:', {
+                programId: this.PROGRAM_ID,
+                numAccounts: accounts.length
+            });
+
+            // 创建程序实例
+            const program = new Program(
                 IDL,
                 this.PROGRAM_ID,
                 provider
             );
+
+            // 验证程序实例
+            if (!program.account || !program.idl) {
+                throw new Error('Program initialization failed');
+            }
+
+            return program;
+
         } catch (error) {
             logger.error('Failed to create program:', {
                 error: error.message,
                 provider: provider?.wallet?.publicKey?.toString(),
-                programId: this.PROGRAM_ID.toString()
+                programId: this.PROGRAM_ID.toString(),
+                stack: error.stack
             });
             throw error;
         }
@@ -1585,11 +1617,25 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     }
 }
     async initializeProvider(seller) {
-        if (!this.provider || !this.provider.program) {
-            // 重新初始化 provider
+        try {
+            if (!seller) {
+                throw new Error('Seller is required for provider initialization');
+            }
+
+            // 验证 seller 的有效性
+            if (!seller.publicKey) {
+                throw new Error('Invalid seller: missing public key');
+            }
+
+            // 如果已经有有效的 provider 和 program，直接返回
+            if (this.provider?.program && this.program) {
+                return;
+            }
+
+            // 创建新的 provider
             const provider = new AnchorProvider(
                 this.connection,
-                new CustomWallet(seller), // 使用卖家的 keypair
+                new CustomWallet(seller),
                 {
                     commitment: 'confirmed',
                     preflightCommitment: 'confirmed',
@@ -1597,9 +1643,35 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             );
 
+            // 验证 provider
+            if (!provider.wallet || !provider.connection) {
+                throw new Error('Provider initialization failed: missing wallet or connection');
+            }
+
             // 创建程序实例
-            this.program = this.createProgram(provider);
+            const program = this.createProgram(provider);
+
+            // 验证程序创建结果
+            if (!program || !program.account) {
+                throw new Error('Program initialization failed: invalid program instance');
+            }
+
+            // 设置 provider 和 program
             this.provider = provider;
+            this.program = program;
+
+            logger.info('Provider and program initialized successfully:', {
+                wallet: provider.wallet.publicKey.toString(),
+                programId: program.programId.toString()
+            });
+
+        } catch (error) {
+            logger.error('Provider initialization failed:', {
+                error: error.message,
+                seller: seller?.publicKey?.toString(),
+                stack: error.stack
+            });
+            throw error;
         }
     }
     async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
