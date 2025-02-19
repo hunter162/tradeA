@@ -1856,134 +1856,190 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
 // Then in the sell method:
     async sell(seller, tokenMint, amount, options = {}) {
-        try {
-            // 1. 验证输入参数
-            if (!seller?.publicKey) {
-                throw new Error('无效的卖家: 缺少publicKey');
-            }
-            if (!tokenMint) {
-                throw new Error('无效的代币铸造参数');
-            }
-            if (!amount) {
-                throw new Error('需要提供金额');
-            }
+        const MAX_RETRIES = 3;
+        let attempt = 0;
+        let lastError;
 
-            // 确保mint地址是PublicKey实例
-            const mintPubkey = tokenMint instanceof PublicKey ?
-                tokenMint : new PublicKey(tokenMint);
-
-            logger.info('开始简化卖出交易:', {
-                seller: seller.publicKey.toString(),
-                mint: mintPubkey.toString(),
-                amount: amount.toString()
-            });
-
-            // 2. 查找关联代币账户
-            const tokenAccount = await getAssociatedTokenAddress(
-                mintPubkey,
-                seller.publicKey
-            );
-
-            // 3. 检查代币余额
-            const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
-            if (BigInt(tokenBalance.value.amount) < BigInt(amount)) {
-                throw new Error(`代币余额不足. 需要: ${amount}, 可用: ${tokenBalance.value.amount}`);
-            }
-
-            logger.info('代币余额确认:', {
-                account: tokenAccount.toString(),
-                balance: tokenBalance.value.amount,
-                amount: amount.toString()
-            });
-
-            // 4. 创建交易
-            const transaction = new SolanaTransaction();
-
-            // 5. 添加卖出指令
-            // 使用更少的账户参与交互，只包括最基本的必需账户
-            const sellIx = {
-                programId: new PublicKey(this.PROGRAM_ID),
-                keys: [
-                    // 代币铸造账户
-                    { pubkey: mintPubkey, isSigner: false, isWritable: true },
-                    // 卖家的代币账户
-                    { pubkey: tokenAccount, isSigner: false, isWritable: true },
-                    // 卖家钱包
-                    { pubkey: seller.publicKey, isSigner: true, isWritable: true },
-                    // 系统程序
-                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                    // 代币程序
-                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                ],
-                data: Buffer.from([
-                    // 指令选择器 (自定义简化指令)
-                    0x02, // 简化的卖出指令ID
-                    // 使用小端序列化金额 (简化的指令格式)
-                    ...new BN(amount.toString()).toArray('le', 8)
-                ])
-            };
-
-            transaction.add(sellIx);
-
-            // 6. 添加计算单元预算指令
-            transaction.add(
-                ComputeBudgetProgram.setComputeUnitLimit({
-                    units: 300000 // 增加计算单元上限
-                })
-            );
-
-            // 7. 获取最新的块哈希
-            const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
-
-            transaction.recentBlockhash = blockhash;
-            transaction.lastValidBlockHeight = lastValidBlockHeight;
-            transaction.feePayer = seller.publicKey;
-
-            // 8. 发送交易
-            logger.info('发送卖出交易...');
-
-            // 跳过模拟，直接发送
-            const signature = await sendAndConfirmTransaction(
-                this.connection,
-                transaction,
-                [seller],
-                {
-                    skipPreflight: true, // 跳过预检查
-                    preflightCommitment: 'processed',
-                    commitment: 'confirmed',
-                    maxRetries: 3
+        while (attempt < MAX_RETRIES) {
+            try {
+                // 1. 验证输入参数
+                if (!seller?.publicKey) {
+                    throw new Error('Invalid seller: missing publicKey');
                 }
-            );
+                if (!tokenMint) {
+                    throw new Error('Invalid token mint');
+                }
+                if (!amount) {
+                    throw new Error('Amount is required');
+                }
 
-            logger.info('卖出交易成功:', {
-                signature,
-                seller: seller.publicKey.toString(),
-                amount: amount.toString()
-            });
+                // 确保mint地址是PublicKey实例
+                const mintPubkey = tokenMint instanceof PublicKey ?
+                    tokenMint : new PublicKey(tokenMint);
 
-            // 9. 返回结果
-            return {
-                success: true,
-                signature,
-                txId: signature,
-                amount: amount.toString(),
-                mint: mintPubkey.toString(),
-                owner: seller.publicKey.toString(),
-                timestamp: new Date().toISOString()
-            };
+                logger.info('Starting sell transaction:', {
+                    seller: seller.publicKey.toString(),
+                    mint: mintPubkey.toString(),
+                    amount: amount.toString(),
+                    attempt: attempt + 1
+                });
 
-        } catch (error) {
-            logger.error('卖出交易失败:', {
-                error: error.message,
-                seller: seller?.publicKey?.toString(),
-                mint: tokenMint instanceof PublicKey ? tokenMint.toString() : tokenMint,
-                amount: amount?.toString(),
-                stack: error.stack
-            });
-            throw error;
+                // 2. 查找关联代币账户
+                const tokenAccount = await getAssociatedTokenAddress(
+                    mintPubkey,
+                    seller.publicKey
+                );
+
+                // 3. 检查代币余额
+                const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
+                if (BigInt(tokenBalance.value.amount) < BigInt(amount)) {
+                    throw new Error(`Insufficient token balance. Required: ${amount}, Available: ${tokenBalance.value.amount}`);
+                }
+
+                logger.info('Token balance confirmed:', {
+                    account: tokenAccount.toString(),
+                    balance: tokenBalance.value.amount,
+                    amount: amount.toString()
+                });
+
+                // 4. 创建交易
+                const transaction = new Transaction();
+
+                // 5. 构建卖出指令
+                const globalAccount = await this.getGlobalAccount();
+                const bondingCurveAddress = await this.findBondingCurveAddress(mintPubkey);
+
+                const sellIx = {
+                    programId: new PublicKey(this.PROGRAM_ID),
+                    keys: [
+                        // 代币铸造账户
+                        { pubkey: mintPubkey, isSigner: false, isWritable: true },
+                        // 绑定曲线账户
+                        { pubkey: bondingCurveAddress, isSigner: false, isWritable: true },
+                        // 全局状态账户
+                        { pubkey: globalAccount.address, isSigner: false, isWritable: false },
+                        // 卖家的代币账户
+                        { pubkey: tokenAccount, isSigner: false, isWritable: true },
+                        // 卖家钱包
+                        { pubkey: seller.publicKey, isSigner: true, isWritable: true },
+                        // 费用接收者
+                        { pubkey: globalAccount.feeRecipient, isSigner: false, isWritable: true },
+                        // 系统程序
+                        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                        // 代币程序
+                        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                    ],
+                    data: Buffer.from([
+                        0x02, // sell instruction
+                        ...new BN(amount.toString()).toArray('le', 8),
+                        ...new BN(options.slippageBasisPoints || 100).toArray('le', 2)
+                    ])
+                };
+
+                transaction.add(sellIx);
+
+                // 6. 添加计算单元预算指令
+                transaction.add(
+                    ComputeBudgetProgram.setComputeUnitLimit({
+                        units: 300000
+                    })
+                );
+
+                if (options.priorityFee) {
+                    transaction.add(
+                        ComputeBudgetProgram.setComputeUnitPrice({
+                            microLamports: options.priorityFee
+                        })
+                    );
+                }
+
+                // 7. 获取最新的块哈希
+                const { blockhash, lastValidBlockHeight } =
+                    await this.connection.getLatestBlockhash('confirmed');
+
+                transaction.recentBlockhash = blockhash;
+                transaction.lastValidBlockHeight = lastValidBlockHeight;
+                transaction.feePayer = seller.publicKey;
+
+                // 8. 模拟交易
+                logger.info('Simulating transaction...');
+                const simulation = await this.connection.simulateTransaction(
+                    transaction,
+                    [seller],
+                    {
+                        sigVerify: false,
+                        commitment: 'confirmed',
+                        replaceRecentBlockhash: true
+                    }
+                );
+
+                if (simulation.value.err) {
+                    throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
+                }
+
+                // 9. 发送交易
+                logger.info('Sending sell transaction...');
+                const signature = await sendAndConfirmTransaction(
+                    this.connection,
+                    transaction,
+                    [seller],
+                    {
+                        skipPreflight: false,
+                        preflightCommitment: 'confirmed',
+                        commitment: 'confirmed',
+                        maxRetries: 3
+                    }
+                );
+
+                // 10. 等待确认
+                await this.waitForTransaction(signature, 'confirmed');
+
+                logger.info('Sell transaction successful:', {
+                    signature,
+                    seller: seller.publicKey.toString(),
+                    amount: amount.toString()
+                });
+
+                // 11. 返回结果
+                return {
+                    success: true,
+                    signature,
+                    txId: signature,
+                    amount: amount.toString(),
+                    mint: mintPubkey.toString(),
+                    owner: seller.publicKey.toString(),
+                    timestamp: new Date().toISOString()
+                };
+
+            } catch (error) {
+                lastError = error;
+                attempt++;
+
+                logger.warn(`Sell attempt ${attempt} failed:`, {
+                    error: error.message,
+                    seller: seller?.publicKey?.toString(),
+                    mint: tokenMint instanceof PublicKey ? tokenMint.toString() : tokenMint,
+                    amount: amount?.toString()
+                });
+
+                if (attempt === MAX_RETRIES) {
+                    logger.error('All sell attempts failed:', {
+                        error: lastError.message,
+                        attempts: MAX_RETRIES,
+                        seller: seller?.publicKey?.toString(),
+                        mint: tokenMint instanceof PublicKey ? tokenMint.toString() : tokenMint,
+                        amount: amount?.toString(),
+                        stack: lastError.stack
+                    });
+                    throw lastError;
+                }
+
+                // 等待后重试
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            }
         }
     }
+
 
     validateTransaction(transaction) {
         try {
