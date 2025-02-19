@@ -1836,6 +1836,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Amount is required');
             }
 
+            // 确保 mintPubkey 是 PublicKey 实例
             const mintPubkey = new PublicKey(tokenMint);
 
             logger.info('开始卖出代币:', {
@@ -1844,129 +1845,134 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 amount: amount.toString()
             });
 
-            // 2. 查找相关账户
-            const [globalAddress] = await PublicKey.findProgramAddress(
-                [Buffer.from('global')],
-                this.PROGRAM_ID
-            );
+            try {
+                // 2. 查找 PDA
+                const [globalAddress] = PublicKey.findProgramAddressSync(
+                    [Buffer.from('global')],
+                    this.PROGRAM_ID
+                );
 
-            const [bondingCurveAddress] = await PublicKey.findProgramAddress(
-                [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
-                this.PROGRAM_ID
-            );
+                const [bondingCurveAddress] = PublicKey.findProgramAddressSync(
+                    [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
+                    this.PROGRAM_ID
+                );
 
-            // 3. 获取代币账户
-            const associatedTokenAddress = await getAssociatedTokenAddress(
-                mintPubkey,
-                seller.publicKey
-            );
+                // 3. 获取代币账户
+                const associatedTokenAddress = await getAssociatedTokenAddress(
+                    mintPubkey,
+                    seller.publicKey
+                );
 
-            // 4. 检查代币余额
-            const tokenBalance = await this.connection.getTokenAccountBalance(associatedTokenAddress);
-            if (!tokenBalance?.value?.amount || BigInt(tokenBalance.value.amount) < BigInt(amount)) {
-                throw new Error(`Insufficient token balance. Required: ${amount.toString()}, Available: ${tokenBalance?.value?.amount || '0'}`);
-            }
-
-            // 5. 创建销售指令
-            const sellInstruction = {
-                programId: this.PROGRAM_ID,
-                keys: [
-                    { pubkey: globalAddress, isSigner: false, isWritable: false },
-                    { pubkey: globalAddress, isSigner: false, isWritable: true }, // feeRecipient
-                    { pubkey: mintPubkey, isSigner: false, isWritable: true },
-                    { pubkey: bondingCurveAddress, isSigner: false, isWritable: true },
-                    { pubkey: associatedTokenAddress, isSigner: false, isWritable: true },
-                    { pubkey: seller.publicKey, isSigner: true, isWritable: true },
-                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                    { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
-                ],
-                data: Buffer.from([
-                    ...new Uint8Array([51, 230, 133, 164, 1, 127, 131, 173]), // sell discriminator
-                    ...new BN(amount.toString()).toArray('le', 8),
-                    ...new BN(0).toArray('le', 8) // minSolOutput
-                ])
-            };
-
-            // 6. 创建交易
-            let transaction = new Transaction();
-            transaction.add(sellInstruction);
-            transaction.feePayer = seller.publicKey;
-
-            // 7. 获取最新的区块哈希
-            const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
-            transaction.recentBlockhash = blockhash;
-            transaction.lastValidBlockHeight = lastValidBlockHeight;
-
-            // 8. 处理优先上链
-            if (options.usePriorityFee) {
-                if (options.priorityType === 'nozomi') {
-                    // 使用 Nozomi
-                    transaction = await this.jitoService.addPriorityFee(transaction, {
-                        type: 'nozomi',
-                        tipAmountSol: options.tipAmountSol || 0.001
-                    });
-                } else if (options.priorityType === 'jito') {
-                    // 使用 Jito
-                    transaction = await this.jitoService.addPriorityFee(transaction, {
-                        type: 'jito',
-                        tipAmountSol: options.tipAmountSol || 0.001
-                    });
-                } else if (options.microLamports) {
-                    // 使用计算单元价格
-                    const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({
-                        microLamports: options.microLamports
-                    });
-                    transaction.instructions.unshift(priorityFeeIx);
+                // 4. 检查代币余额
+                const tokenBalance = await this.connection.getTokenAccountBalance(associatedTokenAddress);
+                if (!tokenBalance?.value?.amount || BigInt(tokenBalance.value.amount) < BigInt(amount)) {
+                    throw new Error(`Insufficient token balance. Required: ${amount.toString()}, Available: ${tokenBalance?.value?.amount || '0'}`);
                 }
-            }
 
-            // 9. 发送和确认交易
-            let signature;
-            if (options.usePriorityFee && options.priorityType === 'nozomi') {
-                signature = await this.sendTransactionViaNozomi(
-                    transaction,
-                    [seller],
-                    NOZOMI_CONFIG
-                );
-            } else {
-                signature = await sendAndConfirmTransaction(
-                    this.connection,
-                    transaction,
-                    [seller],
-                    {
-                        skipPreflight: false,
-                        preflightCommitment: 'confirmed',
-                        commitment: 'confirmed',
-                        maxRetries: 5
+                // 5. 创建销售指令
+                const sellInstruction = {
+                    programId: this.PROGRAM_ID,
+                    keys: [
+                        { pubkey: globalAddress, isSigner: false, isWritable: false },
+                        { pubkey: globalAddress, isSigner: false, isWritable: true }, // feeRecipient
+                        { pubkey: mintPubkey, isSigner: false, isWritable: true },
+                        { pubkey: bondingCurveAddress, isSigner: false, isWritable: true },
+                        { pubkey: associatedTokenAddress, isSigner: false, isWritable: true },
+                        { pubkey: seller.publicKey, isSigner: true, isWritable: true },
+                        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+                    ],
+                    data: Buffer.from([
+                        ...new Uint8Array([51, 230, 133, 164, 1, 127, 131, 173]), // sell discriminator
+                        ...new BN(amount.toString()).toArray('le', 8),
+                        ...new BN(0).toArray('le', 8) // minSolOutput
+                    ])
+                };
+
+                // 6. 创建交易
+                let transaction = new Transaction();
+                transaction.add(sellInstruction);
+                transaction.feePayer = seller.publicKey;
+
+                // 7. 获取最新的区块哈希
+                const { blockhash, lastValidBlockHeight } =
+                    await this.connection.getLatestBlockhash('confirmed');
+                transaction.recentBlockhash = blockhash;
+                transaction.lastValidBlockHeight = lastValidBlockHeight;
+
+                // 8. 处理优先上链
+                if (options.usePriorityFee) {
+                    if (options.priorityType === 'nozomi') {
+                        transaction = await this.jitoService.addPriorityFee(transaction, {
+                            type: 'nozomi',
+                            tipAmountSol: options.tipAmountSol || 0.001
+                        });
+                    } else if (options.priorityType === 'jito') {
+                        transaction = await this.jitoService.addPriorityFee(transaction, {
+                            type: 'jito',
+                            tipAmountSol: options.tipAmountSol || 0.001
+                        });
+                    } else if (options.microLamports) {
+                        const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({
+                            microLamports: options.microLamports
+                        });
+                        transaction.instructions.unshift(priorityFeeIx);
                     }
-                );
+                }
+
+                // 9. 发送和确认交易
+                let signature;
+                if (options.usePriorityFee && options.priorityType === 'nozomi') {
+                    signature = await this.sendTransactionViaNozomi(
+                        transaction,
+                        [seller],
+                        NOZOMI_CONFIG
+                    );
+                } else {
+                    signature = await sendAndConfirmTransaction(
+                        this.connection,
+                        transaction,
+                        [seller],
+                        {
+                            skipPreflight: false,
+                            preflightCommitment: 'confirmed',
+                            commitment: 'confirmed',
+                            maxRetries: 5
+                        }
+                    );
+                }
+
+                // 10. 返回结果
+                const result = {
+                    signature,
+                    success: true,
+                    amount: amount.toString(),
+                    mint: mintPubkey.toString(),
+                    owner: seller.publicKey.toString(),
+                    timestamp: Date.now(),
+                    priorityFee: options.usePriorityFee ? {
+                        type: options.priorityType || 'default',
+                        amount: options.tipAmountSol || (options.microLamports / 1_000_000)
+                    } : undefined
+                };
+
+                logger.info('卖出交易成功:', {
+                    signature: result.signature,
+                    seller: seller.publicKey.toString(),
+                    amount: amount.toString(),
+                    mint: mintPubkey.toString(),
+                    priorityFee: result.priorityFee
+                });
+
+                return result;
+            } catch (innerError) {
+                logger.error('交易执行失败:', {
+                    error: innerError.message,
+                    stack: innerError.stack
+                });
+                throw innerError;
             }
-
-            // 10. 返回结果
-            const result = {
-                signature,
-                success: true,
-                amount: amount.toString(),
-                mint: mintPubkey.toString(),
-                owner: seller.publicKey.toString(),
-                timestamp: Date.now(),
-                priorityFee: options.usePriorityFee ? {
-                    type: options.priorityType || 'default',
-                    amount: options.tipAmountSol || (options.microLamports / 1_000_000)
-                } : undefined
-            };
-
-            logger.info('卖出交易成功:', {
-                signature: result.signature,
-                seller: seller.publicKey.toString(),
-                amount: amount.toString(),
-                mint: mintPubkey.toString(),
-                priorityFee: result.priorityFee
-            });
-
-            return result;
 
         } catch (error) {
             logger.error('卖出代币失败:', {
