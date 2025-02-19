@@ -2,7 +2,7 @@ import {createRequire} from 'module';
 
 const require = createRequire(import.meta.url);
 import pkg from 'pumpdotfun-sdk';
-import { AnchorProvider, Program } from "@coral-xyz/anchor";
+import {AnchorProvider, BorshCoder, Program} from "@coral-xyz/anchor";
 const {PumpFunSDK, GlobalAccount} = pkg;
 import {logger} from '../utils/index.js';
 import {PinataService} from './pinataService.js';
@@ -143,10 +143,13 @@ export class CustomPumpSDK extends PumpFunSDK {
         );
         const tempKeypair = Keypair.generate();
         const wallet = new CustomWallet(tempKeypair);
-        // 仅用于程序初始化的默认 Provider
+
+        // 创建 coder
+        const coder = new BorshCoder(IDL);
+
+        // 创建 provider
         const defaultProvider = new AnchorProvider(
             connection,
-            // 使用空钱包，因为这个 provider 只用于初始化
             wallet,
             {
                 commitment: options.commitment || 'confirmed',
@@ -155,6 +158,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             }
         );
         super(defaultProvider);
+        this._coder = coder;
         this.provider = defaultProvider;  //
         this.solanaService = null;
         this.connection = connection;
@@ -208,16 +212,17 @@ export class CustomPumpSDK extends PumpFunSDK {
         }
 
         try {
-            // 直接使用 Program 创建而不检查账户定义
+            if (!this._coder) {
+                this._coder = new BorshCoder(IDL);
+            }
+
+            // 创建 Program 实例
             const program = new Program(
                 IDL,
                 this.PROGRAM_ID,
-                provider
+                provider,
+                this._coder  // 明确指定 coder
             );
-
-            if (!program) {
-                throw new Error('Program initialization failed');
-            }
 
             logger.info('Program created successfully:', {
                 programId: this.PROGRAM_ID,
