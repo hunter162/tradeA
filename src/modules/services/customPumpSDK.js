@@ -16,7 +16,8 @@ import {
     SYSVAR_RENT_PUBKEY,
     PublicKey,
     ComputeBudgetProgram,
-    Keypair, Transaction
+    Keypair, Transaction,
+    TransactionInstruction
 } from '@solana/web3.js';
 import {
     TOKEN_PROGRAM_ID,
