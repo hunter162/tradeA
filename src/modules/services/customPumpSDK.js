@@ -1628,7 +1628,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Valid seller is required');
             }
 
-            // 如果已经初始化，直接返回
             if (this.provider?.program && this.program) {
                 return;
             }
@@ -1648,10 +1647,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             this.provider = provider;
             this.program = program;
 
+            logger.info('Provider 和程序初始化成功:', {
+                wallet: provider.wallet.publicKey.toString(),
+                programId: program.programId.toString()
+            });
+
         } catch (error) {
-            logger.error('Provider initialization failed:', {
+            logger.error('Provider 初始化失败:', {
                 error: error.message,
-                seller: seller?.publicKey?.toString()
+                seller: seller?.publicKey?.toString(),
+                stack: error.stack
             });
             throw error;
         }
