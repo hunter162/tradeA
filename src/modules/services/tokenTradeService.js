@@ -203,13 +203,7 @@ export class TokenTradeService {
                 throw new Error('Wallet not found');
             }
 
-            // 2. 获取代币信息并执行验证
-            const tokenInfo = await this.getTokenInfo(tokenAddress);
-            if (!tokenInfo) {
-                throw new Error(`Token ${tokenAddress} not found`);
-            }
-
-            // 3. 计算卖出数量
+            // 2. 获取代币余额
             const tokenBalance = await this.solanaService.getTokenBalance(
                 keypair.publicKey.toString(),
                 tokenAddress
@@ -227,65 +221,47 @@ export class TokenTradeService {
                 percentage: `${percentage}%`
             });
 
-            // 4. 创建钱包实例
-            const wallet = new Wallet(keypair);
-
-            // 5. 创建并配置 Provider
-            const provider = new AnchorProvider(
-                this.solanaService.connection,
-                wallet,
-                {
-                    commitment: 'confirmed',
-                    preflightCommitment: 'confirmed',
-                    skipPreflight: false
-                }
-            );
-
-            // 6. 创建 SDK 实例
-            const sdk = new CustomPumpSDK(provider);
+            // 3. 执行卖出操作
+            const sdk = new CustomPumpSDK(this.solanaService.connection);
             sdk.setSolanaService(this.solanaService);
 
-            // 7. 准备优先费用选项
-            const priorityFees = options.usePriorityFee ? {
-                microLamports: options.microLamports,
-                type: options.priorityType || 'default'
-            } : undefined;
-
-            // 8. 执行卖出操作
             const result = await sdk.sell(
                 keypair,
-                new PublicKey(tokenAddress),
+                tokenAddress,
                 sellAmount,
-                BigInt(options.slippage || 100),
-                priorityFees,
                 {
-                    usePriorityFee: options.usePriorityFee,
-                    priorityType: options.priorityType,
-                    deadline: options.deadline || 60
+                    ...options,
+                    slippageBasisPoints: options.slippage ? options.slippage * 100 : 100
                 }
             );
 
-            // 9. 保存交易记录
+            // 4. 验证结果
+            if (!result || !result.signature) {
+                throw new Error('交易执行失败: 未收到有效的交易签名');
+            }
+
+            // 5. 保存交易记录
             await this.saveTradeTransaction({
                 signature: result.signature,
                 mint: tokenAddress,
                 owner: keypair.publicKey.toString(),
                 type: 'sell',
                 amount: sellAmount.toString(),
+                tokenAmount: sellAmount.toString(),
+                tokenDecimals: 0, // 或从代币信息中获取
                 metadata: {
                     percentage,
-                    tokenInfo,
                     options
                 }
             });
 
-            logger.info('代币卖出成功:', {
+            return {
+                success: true,
                 signature: result.signature,
-                token: tokenAddress,
-                amount: sellAmount.toString()
-            });
-
-            return result;
+                amount: sellAmount.toString(),
+                owner: keypair.publicKey.toString(),
+                mint: tokenAddress
+            };
 
         } catch (error) {
             logger.error('卖出代币失败:', {
