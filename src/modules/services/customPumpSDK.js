@@ -222,22 +222,61 @@ export class CustomPumpSDK extends PumpFunSDK {
         }
 
         try {
-            if (!this._coder) {
-                this._coder = new BorshCoder(IDL);
-            }
+            // 确保 IDL 包含正确的字段定义
+            const idlWithTypes = {
+                ...IDL,
+                accounts: [
+                    {
+                        name: "Global",
+                        type: {
+                            kind: "struct",
+                            fields: [
+                                { name: "initialized", type: "bool" },
+                                { name: "authority", type: "pubkey" },
+                                { name: "feeRecipient", type: "pubkey" },
+                                { name: "initialVirtualTokenReserves", type: "u64" },
+                                { name: "initialVirtualSolReserves", type: "u64" },
+                                { name: "initialRealTokenReserves", type: "u64" },
+                                { name: "tokenTotalSupply", type: "u64" },
+                                { name: "feeBasisPoints", type: "u64" }
+                            ]
+                        }
+                    },
+                    {
+                        name: "BondingCurve",
+                        type: {
+                            kind: "struct",
+                            fields: [
+                                { name: "virtualTokenReserves", type: "u64" },
+                                { name: "virtualSolReserves", type: "u64" },
+                                { name: "realTokenReserves", type: "u64" },
+                                { name: "realSolReserves", type: "u64" },
+                                { name: "tokenTotalSupply", type: "u64" },
+                                { name: "complete", type: "bool" }
+                            ]
+                        }
+                    }
+                ]
+            };
 
-            // 确保 IDL 的 accounts 包含 size 信息
-            const accountsWithSize = IDL.accounts.map(account => ({
-                ...account,
-                size: ACCOUNT_SIZES[account.name]
-            }));
+            // 使用完整的 IDL 创建 coder
+            this._coder = new BorshCoder(idlWithTypes);
+
+            // 设置账户大小计算函数
+            if (this._coder.accounts) {
+                const accountSizes = {
+                    Global: 8 + 1 + 32 + 32 + 8 + 8 + 8 + 8 + 8, // 计算实际大小
+                    BondingCurve: 8 + 8 + 8 + 8 + 8 + 1 // 计算实际大小
+                };
+
+                this._coder.accounts.size = (accountName) => {
+                    return accountSizes[accountName] || 0;
+                };
+            }
 
             // 创建程序实例
             const program = new Program(
-                {
-                    ...IDL,
-                    accounts: accountsWithSize
-                },
+                idlWithTypes,
                 this.PROGRAM_ID,
                 provider,
                 this._coder
@@ -246,7 +285,8 @@ export class CustomPumpSDK extends PumpFunSDK {
             logger.info('Program created successfully:', {
                 programId: this.PROGRAM_ID,
                 provider: provider.wallet.publicKey.toString(),
-                hasAccounts: !!program.account
+                hasAccounts: !!program.account,
+                accountTypes: Object.keys(accountSizes)
             });
 
             return program;
