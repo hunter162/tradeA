@@ -1865,33 +1865,40 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Amount is required');
             }
 
-            // Ensure programId and token address are PublicKey instances
-            const programId = new PublicKey(this.PROGRAM_ID);
-            const mintPubkey = new PublicKey(tokenMint);
+            // Ensure mint address is a PublicKey instance
+            const mintPubkey = tokenMint instanceof PublicKey ?
+                tokenMint : new PublicKey(tokenMint);
+
             const slippageBasisPoints = options.slippageBasisPoints || 100;
 
-            logger.info('Starting sell transaction:', {
+            logger.info('Starting sell transaction with direct method:', {
                 seller: seller.publicKey.toString(),
                 mint: mintPubkey.toString(),
                 amount: amount.toString(),
                 slippage: slippageBasisPoints
             });
 
-            // 2. Initialize provider and program if not already initialized
-            await this.initializeProvider(seller);
+            // 2. Create transaction
+            const transaction = new Transaction();
 
-            // 3. Find necessary PDA addresses
-            const globalAccount = await this.getGlobalAccount();
+            // 3. Find PDA addresses
+            const [globalAddress] = PublicKey.findProgramAddressSync(
+                [Buffer.from('global')],
+                new PublicKey(this.PROGRAM_ID)
+            );
 
             const [bondingCurveAddress] = PublicKey.findProgramAddressSync(
                 [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
-                programId
+                new PublicKey(this.PROGRAM_ID)
             );
 
             // 4. Get token account address
-            const tokenAccount = await this.findAssociatedTokenAddress(
+            const tokenAccount = await getAssociatedTokenAddress(
+                mintPubkey,
                 seller.publicKey,
-                mintPubkey
+                false,
+                TOKEN_PROGRAM_ID,
+                ASSOCIATED_TOKEN_PROGRAM_ID
             );
 
             // Check if token account exists and contains tokens
@@ -1914,30 +1921,56 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error(`Token account not found or unavailable: ${error.message}`);
             }
 
-            // 5. Create the transaction
-            const transaction = new Transaction();
+            // Get global account info to find fee recipient
+            const globalAccountInfo = await this.connection.getAccountInfo(globalAddress);
+            if (!globalAccountInfo || !globalAccountInfo.data) {
+                throw new Error('Global account not found or has no data');
+            }
 
-            // 6. Create sell instruction using the program methods
-            const sellInstruction = await this.program.methods
-                .sell(
-                    new BN(amount.toString()),
-                    new BN(slippageBasisPoints.toString())
-                )
-                .accounts({
-                    tokenMint: mintPubkey,
-                    bondingCurve: bondingCurveAddress,
-                    globalState: globalAccount.address,
-                    tokenOwner: seller.publicKey,
-                    tokenAccount: tokenAccount,
-                    feeRecipient: globalAccount.feeRecipient,
-                    systemProgram: SystemProgram.programId,
-                    tokenProgram: TOKEN_PROGRAM_ID
-                })
-                .instruction();
+            // Parse global account data to get fee recipient (assume it's at offset 33, after initialized boolean and authority)
+            const feeRecipientPubkey = new PublicKey(globalAccountInfo.data.slice(33, 65));
+
+            logger.info('Account details:', {
+                globalAccount: globalAddress.toString(),
+                bondingCurve: bondingCurveAddress.toString(),
+                feeRecipient: feeRecipientPubkey.toString(),
+                tokenAccount: tokenAccount.toString()
+            });
+
+            // 5. Create sell instruction manually
+            const keys = [
+                { pubkey: mintPubkey, isSigner: false, isWritable: true },
+                { pubkey: bondingCurveAddress, isSigner: false, isWritable: true },
+                { pubkey: globalAddress, isSigner: false, isWritable: false },
+                { pubkey: seller.publicKey, isSigner: true, isWritable: true },
+                { pubkey: tokenAccount, isSigner: false, isWritable: true },
+                { pubkey: feeRecipientPubkey, isSigner: false, isWritable: true },
+                { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+            ];
+
+            // Sell instruction layout:
+            // - 8 bytes: discriminator/anchor identifier for sell (precomputed)
+            // - 8 bytes: amount (u64/BN)
+            // - 8 bytes: min_sol_out (u64/BN, for slippage)
+            const sellInstructionData = Buffer.concat([
+                // discriminator for 'sell' - typically first 8 bytes of sha256("global:sell")
+                Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]),
+                // amount as little-endian u64
+                new BN(amount.toString()).toArrayLike(Buffer, 'le', 8),
+                // min_sol_out (0 for now, could add slippage protection)
+                new BN(0).toArrayLike(Buffer, 'le', 8)
+            ]);
+
+            const sellInstruction = new TransactionInstruction({
+                keys,
+                programId: new PublicKey(this.PROGRAM_ID),
+                data: sellInstructionData
+            });
 
             transaction.add(sellInstruction);
 
-            // 7. Get the latest blockhash
+            // 6. Get the latest blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -1945,12 +1978,12 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 8. Simulate the transaction first
+            // 7. Simulate the transaction first
             logger.info('Simulating sell transaction before sending...');
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller],
-                { commitment: 'confirmed', replaceRecentBlockhash: true }
+                { commitment: 'confirmed' }
             );
 
             if (simulation.value.err) {
@@ -1965,7 +1998,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             logger.info('Simulation successful, sending transaction...');
 
-            // 9. Send and confirm transaction
+            // 8. Send and confirm transaction
             const signature = await sendAndConfirmTransaction(
                 this.connection,
                 transaction,
@@ -1991,7 +2024,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 amount: amount.toString()
             });
 
-            // 10. Return result with necessary information
+            // 9. Return result with necessary information
             return {
                 success: true,
                 signature,
@@ -2006,7 +2039,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             logger.error('Sell transaction failed:', {
                 error: error.message,
                 seller: seller?.publicKey?.toString(),
-                mint: tokenMint,
+                mint: tokenMint instanceof PublicKey ? tokenMint.toString() : tokenMint,
                 amount: amount?.toString(),
                 stack: error.stack
             });
