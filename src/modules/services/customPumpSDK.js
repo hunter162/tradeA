@@ -1852,6 +1852,9 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     }
 
 
+
+
+// Then in the sell method:
     async sell(seller, tokenMint, amount, options = {}) {
         try {
             // 1. Validate input parameters
@@ -1871,15 +1874,15 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             const slippageBasisPoints = options.slippageBasisPoints || 100;
 
-            logger.info('Starting sell transaction with direct method:', {
+            logger.info('Starting direct sell transaction:', {
                 seller: seller.publicKey.toString(),
                 mint: mintPubkey.toString(),
                 amount: amount.toString(),
                 slippage: slippageBasisPoints
             });
 
-            // 2. Create transaction
-            const transaction = new Transaction();
+            // 2. Create transaction - use the already imported Transaction class
+            const transaction = new SolanaTransaction();
 
             // 3. Find PDA addresses
             const [globalAddress] = PublicKey.findProgramAddressSync(
@@ -1937,23 +1940,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 tokenAccount: tokenAccount.toString()
             });
 
-            // 5. Create sell instruction manually
-            const keys = [
-                { pubkey: mintPubkey, isSigner: false, isWritable: true },
-                { pubkey: bondingCurveAddress, isSigner: false, isWritable: true },
-                { pubkey: globalAddress, isSigner: false, isWritable: false },
-                { pubkey: seller.publicKey, isSigner: true, isWritable: true },
-                { pubkey: tokenAccount, isSigner: false, isWritable: true },
-                { pubkey: feeRecipientPubkey, isSigner: false, isWritable: true },
-                { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
-            ];
-
-            // Sell instruction layout:
-            // - 8 bytes: discriminator/anchor identifier for sell (precomputed)
-            // - 8 bytes: amount (u64/BN)
-            // - 8 bytes: min_sol_out (u64/BN, for slippage)
-            const sellInstructionData = Buffer.concat([
+            // 5. Create sell instruction data
+            const instructionData = Buffer.concat([
                 // discriminator for 'sell' - typically first 8 bytes of sha256("global:sell")
                 Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]),
                 // amount as little-endian u64
@@ -1962,11 +1950,21 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 new BN(0).toArrayLike(Buffer, 'le', 8)
             ]);
 
-            const sellInstruction = new TransactionInstruction({
-                keys,
+            // Create a raw instruction object instead of using TransactionInstruction
+            const sellInstruction = {
                 programId: new PublicKey(this.PROGRAM_ID),
-                data: sellInstructionData
-            });
+                keys: [
+                    { pubkey: mintPubkey, isSigner: false, isWritable: true },
+                    { pubkey: bondingCurveAddress, isSigner: false, isWritable: true },
+                    { pubkey: globalAddress, isSigner: false, isWritable: false },
+                    { pubkey: seller.publicKey, isSigner: true, isWritable: true },
+                    { pubkey: tokenAccount, isSigner: false, isWritable: true },
+                    { pubkey: feeRecipientPubkey, isSigner: false, isWritable: true },
+                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+                ],
+                data: instructionData
+            };
 
             transaction.add(sellInstruction);
 
@@ -1998,7 +1996,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             logger.info('Simulation successful, sending transaction...');
 
-            // 8. Send and confirm transaction
+            // 8. Send and confirm transaction using sendAndConfirmTransaction
             const signature = await sendAndConfirmTransaction(
                 this.connection,
                 transaction,
