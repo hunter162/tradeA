@@ -163,6 +163,14 @@ export class CustomPumpSDK extends PumpFunSDK {
         this.solanaService = null;
         this.connection = connection;
         this.wsManager = new WebSocketManager(connection.rpcEndpoint);
+        logger.info('SDK 初始化:', {
+            hasIDL: !!IDL,
+            hasAccounts: !!IDL.accounts,
+            accountsCount: IDL.accounts?.length,
+            hasCoder: !!this._coder,
+            hasAccountsCoder: !!this._coder?.accounts
+        });
+
         /** @type {import('@coral-xyz/anchor').Program<import('pumpdotfun-sdk').PumpFun>} */
         this.program;
         // 从环境变量获取 RPC 节点列表并解析 JSON
@@ -212,21 +220,45 @@ export class CustomPumpSDK extends PumpFunSDK {
         }
 
         try {
+            // 确保 coder 已初始化
             if (!this._coder) {
                 this._coder = new BorshCoder(IDL);
             }
 
-            // 创建 Program 实例
+            // 验证 coder
+            if (!this._coder.accounts) {
+                logger.error('Coder validation failed:', {
+                    hasCoder: !!this._coder,
+                    hasAccounts: !!this._coder?.accounts,
+                    idlAccounts: IDL.accounts?.length
+                });
+                throw new Error('Invalid coder: missing accounts encoder');
+            }
+
+            logger.debug('Creating program with coder:', {
+                programId: this.PROGRAM_ID,
+                hasAccounts: !!this._coder.accounts,
+                accountsCount: IDL.accounts?.length,
+                provider: provider.wallet.publicKey.toString()
+            });
+
+            // 创建程序实例
             const program = new Program(
                 IDL,
                 this.PROGRAM_ID,
                 provider,
-                this._coder  // 明确指定 coder
+                this._coder  // 显式传递 coder
             );
+
+            // 验证程序创建结果
+            if (!program || !program.account) {
+                throw new Error('Program initialization failed: invalid program instance');
+            }
 
             logger.info('Program created successfully:', {
                 programId: this.PROGRAM_ID,
-                provider: provider.wallet.publicKey.toString()
+                provider: provider.wallet.publicKey.toString(),
+                hasAccounts: !!program.account
             });
 
             return program;
@@ -235,7 +267,10 @@ export class CustomPumpSDK extends PumpFunSDK {
             logger.error('Failed to create program:', {
                 error: error.message,
                 provider: provider?.wallet?.publicKey?.toString(),
-                programId: this.PROGRAM_ID.toString()
+                programId: this.PROGRAM_ID.toString(),
+                hasIDL: !!IDL,
+                hasAccounts: !!IDL.accounts,
+                stack: error.stack
             });
             throw error;
         }
