@@ -1747,11 +1747,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Provider initialization failed');
             }
 
-            // Log available program methods from IDL
-            logger.info('Available IDL methods:', {
-                methods: this.program.idl.instructions.map(ix => ix.name)
-            });
-
             // 3. Convert parameters to correct types
             const sellerPubkey = this.ensurePublicKey(seller);
             const mintPubkey = this.ensurePublicKey(mint);
@@ -1816,27 +1811,27 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
 
             if (!accountInfo) {
-                // Create space for PDA using system program
-                logger.info('Creating associated bonding curve PDA:', {
+                // Try to create associated bonding curve account using 'create' method
+                logger.info('Creating associated bonding curve account:', {
                     address: associatedBondingCurveAddress.toString(),
                     user: sellerPubkey.toString(),
                     mint: mintPubkey.toString()
                 });
 
-                const rent = await this.connection.getMinimumBalanceForRentExemption(128);
-
-                // Create instruction to allocate space for the PDA
-                const createAccountIx = await this.program.methods
-                    .initialize_associated_bonding_curve()  // try snake_case naming
+                const createIx = await this.program.methods
+                    .create()
                     .accounts({
+                        global: globalAccount.address,
+                        mint: mintPubkey,
+                        bondingCurve: bondingCurveAddress,
                         associatedBondingCurve: associatedBondingCurveAddress,
                         user: sellerPubkey,
-                        mint: mintPubkey,
-                        systemProgram: SystemProgram.programId
+                        systemProgram: SystemProgram.programId,
+                        tokenProgram: TOKEN_PROGRAM_ID
                     })
                     .instruction();
 
-                instructions.push(createAccountIx);
+                instructions.push(createIx);
             }
 
             // Add sell instruction
