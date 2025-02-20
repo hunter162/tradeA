@@ -232,13 +232,14 @@ export class TokenTradeService {
             const PRECISION = 1_000_000n; // 使用 6 位精度
             const scaledPercentage = BigInt(Math.round((percentage/100) * Number(PRECISION)));
             const sellAmount = (rawBalance * scaledPercentage) / PRECISION;
-            const sellAmount1 = new BN(sellAmount.toString());
+            const sellAmountBN = new BN(sellAmount.toString());
+
             logger.info('Sell amount calculation:', {
                 rawBalance: rawBalance.toString(),
                 percentage,
                 scaledPercentage: scaledPercentage.toString(),
                 sellAmount: sellAmount.toString(),
-                tokenDecimals: tokenInfo.decimals || 9
+                tokenDecimals: tokenInfo.decimals || 6
             });
 
             // 6. 验证卖出数量
@@ -276,7 +277,7 @@ export class TokenTradeService {
             const result = await sdk.sell(
                 keypair,
                 new PublicKey(cleanTokenAddress),
-                sellAmount,
+                sellAmountBN,
                 slippageBasisPoints,
                 priorityFees,
                 sellOptions
@@ -353,8 +354,15 @@ export class TokenTradeService {
             if (balance?.value?.amount) {
                 return BigInt(balance.value.amount);
             }
-            throw new Error('Invalid token balance format');
+            if (BN.isBN(balance)) {
+                return BigInt(balance.toString());
+            }
+            throw new Error(`Invalid token balance format: ${typeof balance}`);
         } catch (error) {
+            logger.error('解析代币余额失败:', {
+                balance: balance?.toString?.() || balance,
+                type: typeof balance
+            });
             throw new Error(`Failed to parse token balance: ${error.message}`);
         }
     }

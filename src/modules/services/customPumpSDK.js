@@ -1914,7 +1914,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;  // 抛出错误以便上层处理
         }
     }
-    async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
+    async getSellInstructions(seller, mint,feeRecipient ,tokenAmount, slippageBasisPoints) {
         try {
             // 1. Input validation
             if (!seller) throw new Error('Seller is required');
