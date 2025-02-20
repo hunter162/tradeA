@@ -1736,7 +1736,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const globalAccount = await this.getGlobalAccount();
 
             // 2. 生成关联绑定曲线地址
-            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+            const [associatedBondingCurveAddress] = PublicKey.findProgramAddressSync(
                 [
                     Buffer.from('associated-bonding-curve'),
                     user.publicKey.toBuffer(),
@@ -1838,7 +1838,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             });
 
             // 正确生成关联绑定曲线地址 (包含 user 和 mint)
-            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+            const [associatedBondingCurveAddress] = PublicKey.findProgramAddressSync(
                 [
                     Buffer.from('associated-bonding-curve'),
                     userPubkey.toBuffer(),
