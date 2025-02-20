@@ -206,7 +206,8 @@ export class TokenTradeService {
                 groupType,
                 accountNumber,
                 tokenAddress: cleanTokenAddress,
-                percentage
+                percentage,
+                options
             });
 
             // 2. 获取钱包
@@ -248,23 +249,40 @@ export class TokenTradeService {
                 throw new Error(`Insufficient balance. Have: ${rawBalance}, Need: ${sellAmount}`);
             }
 
-            // 7. 执行卖出
+            // 7. 准备卖出参数
             const sdk = new CustomPumpSDK(this.solanaService.connection);
             sdk.setSolanaService(this.solanaService);
 
+            // 将滑点转换为 basis points
+            const slippageBasisPoints = options.slippage ?
+                BigInt(Math.round(options.slippage * 100)) : 100n;
+
+            // 设置优先费用
+            const priorityFees = options.usePriorityFee ? {
+                microLamports: options.priorityFeeSol ?
+                    BigInt(Math.floor(options.priorityFeeSol * 1e6)) : undefined,
+                tipAmountSol: options.priorityFeeSol
+            } : undefined;
+
+            // 设置卖出选项
+            const sellOptions = {
+                usePriorityFee: options.usePriorityFee,
+                priorityType: options.priorityType || 'jito',
+                skipPreflight: options.skipPreflight || false,
+                maxRetries: options.maxRetries || 3
+            };
+
+            // 8. 执行卖出交易
             const result = await sdk.sell(
                 keypair,
                 new PublicKey(cleanTokenAddress),
                 sellAmount,
-                {
-                    ...options,
-                    slippageBasisPoints: options.slippage ?
-                        BigInt(Math.round(options.slippage * 100)) : 100n,
-                    decimals: tokenInfo.decimals || 9
-                }
+                slippageBasisPoints,
+                priorityFees,
+                sellOptions
             );
 
-            // 8. 保存交易记录和更新缓存
+            // 9. 保存交易记录和更新缓存
             await Promise.all([
                 this.saveTradeTransaction({
                     signature: result.signature,
@@ -278,7 +296,12 @@ export class TokenTradeService {
                         requestedPercentage: percentage,
                         actualPercentage: Number(scaledPercentage) / Number(PRECISION),
                         rawBalance: rawBalance.toString(),
-                        options
+                        options: {
+                            slippage: Number(slippageBasisPoints) / 100,
+                            usePriorityFee: options.usePriorityFee,
+                            priorityType: options.priorityType,
+                            priorityFeeSol: options.priorityFeeSol
+                        }
                     }
                 }),
                 this.updateBalanceCache(keypair, cleanTokenAddress)
@@ -287,12 +310,18 @@ export class TokenTradeService {
             return {
                 success: true,
                 signature: result.signature,
+                txId: result.txId,
                 requestedPercentage: percentage,
                 actualPercentage: (Number(scaledPercentage) * 100) / Number(PRECISION),
                 amount: sellAmount.toString(),
                 tokenDecimals: tokenInfo.decimals || 9,
                 owner: keypair.publicKey.toString(),
-                mint: cleanTokenAddress
+                mint: cleanTokenAddress,
+                timestamp: result.timestamp,
+                endpoint: result.endpoint,
+                blockInfo: result.blockInfo,
+                priorityFee: result.priorityFee,
+                simulation: result.simulation
             };
 
         } catch (error) {
@@ -300,7 +329,8 @@ export class TokenTradeService {
                 error: error.message,
                 tokenAddress,
                 percentage,
-                stack: error.stack
+                stack: error.stack,
+                options
             });
 
             if (keypair) {

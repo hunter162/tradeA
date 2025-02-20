@@ -2146,163 +2146,173 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
     // customPumpSDK.js (sell 相关部分)
     // In CustomPumpSDK class
-    async sell(seller, mint, amount, options = {}) {
+    async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
         try {
-            // 1. 基础验证
-            if (!seller || !seller.publicKey) {
-                throw new Error('Invalid seller wallet');
-            }
-            if (!mint) {
-                throw new Error('Invalid mint address');
-            }
-            if (!amount || amount <= 0) {
-                throw new Error('Invalid amount');
-            }
-
-            const mintPubkey = this.ensurePublicKey(mint);
-            let amountBN = new BN(amount.toString());
-
-            logger.info('开始卖出操作:', {
-                seller: seller.publicKey.toString(),
-                mint: mintPubkey.toString(),
-                amount: amountBN.toString(),
-                options: {
-                    ...options,
-                    slippageBasisPoints: options.slippageBasisPoints?.toString()
-                }
-            });
-
-            // 2. 初始化 provider
-            if (!this.program) {
-                await this.initializeProvider(seller);
-            }
-
-            // 3. 确保关联绑定曲线账户存在
-            await this.ensureAssociatedBondingCurveExists(seller, mintPubkey);
-
-            // 4. 创建交易
-            const transaction = new Transaction();
-
-            // 5. 增加计算预算指令
-            transaction.add(
-                ComputeBudgetProgram.setComputeUnitLimit({
-                    units: 600000
-                })
-            );
-
-            // 6. 增加优先费用指令
-            if (options.usePriorityFee || options.priorityFeeSol) {
-                const priorityFeeAmount = options.priorityFeeSol ?
-                    Math.floor(Number(options.priorityFeeSol) * 1000000) : 100000;
-
-                transaction.add(
-                    ComputeBudgetProgram.setComputeUnitPrice({
-                        microLamports: priorityFeeAmount
-                    })
+            return await this.withRetry(async () => {
+                // 2. 获取卖出指令
+                let sellTx = await super.getSellInstructionsByTokenAmount(
+                    seller.publicKey,
+                    mint,
+                    sellTokenAmount,
+                    slippageBasisPoints,
+                    'confirmed'
                 );
-                logger.info('添加优先费用:', { microLamports: priorityFeeAmount });
-            }
 
-            // 7. 获取卖出指令
-            const { instructions, signers } = await this.getSellInstructions(
-                seller.publicKey,
-                mintPubkey,
-                amountBN,
-                options.slippageBasisPoints || 100n
-            );
+                // 3. 处理优先上链
+                if (options.usePriorityFee) {
+                    const jitoService = new JitoService(this.connection);
+                    sellTx = await jitoService.addPriorityFee(sellTx, {
+                        type: options.priorityType || 'jito',
+                        tipAmountSol: priorityFees?.tipAmountSol
+                    });
+                }
+                else if (priorityFees?.microLamports) {
+                    sellTx.add(
+                        ComputeBudgetProgram.setComputeUnitPrice({
+                            microLamports: priorityFees.microLamports
+                        })
+                    );
+                }
 
-            // 8. 添加指令到交易
-            instructions.forEach(instruction => transaction.add(instruction));
+                // 4. 获取最新的 blockhash
+                const { blockhash, lastValidBlockHeight } =
+                    await this.connection.getLatestBlockhash('confirmed');
 
-            // 9. 获取最新的区块哈希
-            const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
+                sellTx.recentBlockhash = blockhash;
+                sellTx.lastValidBlockHeight = lastValidBlockHeight;
+                sellTx.feePayer = seller.publicKey;
 
-            transaction.recentBlockhash = blockhash;
-            transaction.lastValidBlockHeight = lastValidBlockHeight;
-            transaction.feePayer = seller.publicKey;
-
-            // 10. 先模拟交易
-            const simulation = await this.connection.simulateTransaction(
-                transaction,
-                [seller],
-                {
+                // 5. 模拟交易
+                logger.info('开始模拟交易...');
+                const simulation = await this.connection.simulateTransaction(sellTx, [seller], {
                     sigVerify: false,
                     commitment: 'confirmed',
-                    replaceRecentBlockhash: true,
-                    encoding: 'jsonParsed'
-                }
-            );
+                    replaceRecentBlockhash: true
+                });
 
-            if (simulation.value.err) {
-                logger.error('交易模拟失败:', {
-                    error: simulation.value.err,
+                // 6. 分析模拟结果
+                if (simulation.value.err) {
+                    const logs = simulation.value.logs || [];
+                    logger.error('交易模拟失败:', {
+                        error: simulation.value.err,
+                        logs: logs,
+                        mint: mint.toString(),
+                        seller: seller.publicKey.toString()
+                    });
+
+                    // 检查具体错误类型
+                    if (logs.some(log => log.includes('Bonding curve account not found'))) {
+                        throw new Error(`Token ${mint.toString()} is not a valid pump token.`);
+                    }
+                    if (logs.some(log => log.includes('insufficient token balance'))) {
+                        throw new Error('Insufficient token balance for transaction');
+                    }
+                    throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
+                }
+
+                // 7. 计算预估费用
+                const estimatedFee = await this.connection.getFeeForMessage(
+                    sellTx.compileMessage(),
+                    'confirmed'
+                );
+
+                // 8. 检查SOL余额是否足够支付gas费用
+                const balance = await this.connection.getBalance(seller.publicKey);
+                if (BigInt(balance) < BigInt(estimatedFee.value || 0)) {
+                    throw new Error(`Insufficient SOL balance for gas. Required: ${estimatedFee.value}, Current: ${balance}`);
+                }
+
+                logger.info('交易模拟成功:', {
+                    computeUnits: simulation.value.unitsConsumed || 0,
+                    estimatedFee: estimatedFee.value || 0,
                     logs: simulation.value.logs
                 });
-                throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
-            }
 
-            logger.info('交易模拟成功:', {
-                logs: simulation.value.logs,
-                unitsConsumed: simulation.value.unitsConsumed
-            });
+                // 9. 获取最新的区块信息用于实际发送
+                const { value: { blockhash: sendBlockhash, lastValidBlockHeight: sendValidHeight }, context: sendContext } =
+                    await this.connection.getLatestBlockhashAndContext('processed');
 
-            // 11. 发送并确认交易
-            let signature;
-            if (options.usePriorityFee && options.priorityType === 'nozomi') {
-                signature = await this.sendTransactionViaNozomi(
-                    transaction,
-                    [seller],
-                    NOZOMI_CONFIG
-                );
-            } else {
-                signature = await sendAndConfirmTransaction(
-                    this.connection,
-                    transaction,
-                    [seller],
-                    {
-                        skipPreflight: false,
-                        preflightCommitment: 'confirmed',
-                        commitment: 'confirmed',
-                        maxRetries: 3
-                    }
-                );
-            }
+                logger.info('实际发送交易使用的区块信息:', {
+                    blockhash: sendBlockhash,
+                    lastValidBlockHeight: sendValidHeight,
+                    slot: sendContext.slot,
+                    commitment: 'processed',
+                    timestamp: new Date().toISOString()
+                });
 
-            // 12. 构建结果
-            const result = {
-                success: true,
-                signature,
-                amount: amountBN.toString(),
-                mint: mintPubkey.toString(),
-                seller: seller.publicKey.toString(),
-                timestamp: new Date().toISOString(),
-                endpoint: this.connection.rpcEndpoint,
-                priorityFee: options.usePriorityFee ? {
-                    type: options.priorityType || 'default',
-                    amount: options.priorityFeeSol
-                } : undefined,
-                simulation: {
-                    computeUnits: simulation.value.unitsConsumed || 0
+                // 更新交易的区块信息
+                sellTx.recentBlockhash = sendBlockhash;
+                sellTx.lastValidBlockHeight = sendValidHeight - 150; // 减少 150 个区块的有效期
+                sellTx.feePayer = seller.publicKey;
+
+                // 10. 发送交易
+                let signature;
+                if (options.usePriorityFee && options.priorityType === 'nozomi') {
+                    signature = await this.sendTransactionViaNozomi(
+                        sellTx,
+                        [seller],
+                        NOZOMI_CONFIG
+                    );
+                } else {
+                    signature = await sendAndConfirmTransaction(
+                        this.connection,
+                        sellTx,
+                        [seller],
+                        {
+                            skipPreflight: false,
+                            preflightCommitment: 'processed',
+                            maxRetries: 5,
+                            commitment: 'confirmed'
+                        }
+                    );
                 }
-            };
 
-            logger.info('卖出交易成功:', {
-                signature: result.signature,
-                seller: seller.publicKey.toString(),
-                mint: mintPubkey.toString(),
-                amount: amountBN.toString()
+                // 11. 返回结果
+                const result = {
+                    signature,
+                    txId: signature,
+                    amount: sellTokenAmount.toString(),
+                    mint: mint.toString(),
+                    owner: seller.publicKey.toString(),
+                    timestamp: new Date().toISOString(),
+                    slippage: `${Number(slippageBasisPoints) / 100}%`,
+                    status: 'success',
+                    endpoint: this.connection.rpcEndpoint,
+                    priorityFee: options.usePriorityFee ? {
+                        type: options.priorityType || 'jito',
+                        amount: priorityFees?.tipAmountSol
+                    } : undefined,
+                    simulation: {
+                        computeUnits: simulation.value.unitsConsumed || 0,
+                        fee: estimatedFee.value || 0
+                    },
+                    blockInfo: {
+                        blockhash: sendBlockhash,
+                        lastValidBlockHeight: sendValidHeight - 150,
+                        slot: sendContext.slot
+                    }
+                };
+
+                logger.info('卖出交易成功:', {
+                    signature: result.signature,
+                    seller: seller.publicKey.toString(),
+                    mint: mint.toString(),
+                    amount: sellTokenAmount.toString(),
+                    endpoint: this.connection.rpcEndpoint,
+                    priorityFee: result.priorityFee,
+                    simulation: result.simulation
+                });
+
+                return result;
             });
-
-            return result;
-
         } catch (error) {
-            logger.error('卖出操作失败:', {
+            logger.error('❌ 卖出代币失败', {
                 error: error.message,
-                seller: seller?.publicKey?.toString(),
-                mint: mint?.toString?.(),
-                amount: amount?.toString(),
-                stack: error.stack
+                mint: mint.toString(),
+                amount: sellTokenAmount.toString(),
+                slippage: `${Number(slippageBasisPoints) / 100}%`,
+                time: new Date().toISOString(),
+                endpoint: this.connection.rpcEndpoint
             });
             throw error;
         }
