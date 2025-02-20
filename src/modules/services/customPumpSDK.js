@@ -1037,7 +1037,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             }
 
             const pinataResult = await this.solanaService.pinataService.uploadJSON(metadataBody);
-            
+
             if (!pinataResult.success) {
                 throw new Error(`Pinata upload failed: ${pinataResult.error || 'Unknown error'}`);
             }
@@ -1518,9 +1518,9 @@ async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, o
             }
 
             // 4. 获取最新的 blockhash
-            const { blockhash, lastValidBlockHeight } = 
+            const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
-            
+
             buyTx.recentBlockhash = blockhash;
             buyTx.lastValidBlockHeight = lastValidBlockHeight;
             buyTx.feePayer = buyer.publicKey;
@@ -1573,7 +1573,7 @@ async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, o
             });
 
             // 9. 获取最新的区块信息用于实际发送
-            const { value: { blockhash: sendBlockhash, lastValidBlockHeight: sendValidHeight }, context: sendContext } = 
+            const { value: { blockhash: sendBlockhash, lastValidBlockHeight: sendValidHeight }, context: sendContext } =
                 await this.connection.getLatestBlockhashAndContext('processed');
 
             logger.info('实际发送交易使用的区块信息:', {
@@ -1667,7 +1667,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     try {
         // 签名交易
         transaction.sign(...signers);
-        
+
         // 发送到 Nozomi
         const response = await axios.post(
             `${config.URL}/v1/tx`,
@@ -1777,58 +1777,54 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mintPubkey
             );
 
-            // Verify token account exists and has sufficient balance
-            try {
-                const tokenAccountInfo = await this.connection.getAccountInfo(tokenAccount);
-                if (!tokenAccountInfo) {
-                    throw new Error(`Token account ${tokenAccount.toString()} does not exist`);
-                }
-
-                const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
-                logger.debug('Token balance check:', {
-                    account: tokenAccount.toString(),
-                    available: tokenBalance.value.amount,
-                    required: tokenAmount.toString()
-                });
-
-                if (BigInt(tokenBalance.value.amount) < BigInt(tokenAmount.toString())) {
-                    throw new Error(`Insufficient token balance. Required: ${tokenAmount}, Available: ${tokenBalance.value.amount}`);
-                }
-            } catch (error) {
-                if (error.message.includes('does not exist')) {
-                    throw error;
-                }
-                logger.warn('Error checking token balance:', {
-                    error: error.message,
-                    account: tokenAccount.toString()
-                });
-                // Continue anyway, the actual transaction will fail if token balance is insufficient
+            // 6. Get fee recipient
+            const feeRecipient = globalAccount.feeRecipient;
+            if (!feeRecipient) {
+                throw new Error('Fee recipient not found in global account');
             }
 
-            // 6. Build instruction
+            // 7. Calculate minimum SOL output with slippage
+            const calculatedSolOutput = await this.calculateSellSolOutput(
+                mintPubkey,
+                amountBN
+            );
+
+            const minSolOutput = this.calculateWithSlippageSell(
+                calculatedSolOutput,
+                slippageBN
+            );
+
+            // 8. Build instruction
             logger.info('Building sell instruction:', {
                 seller: sellerPubkey.toString(),
                 mint: mintPubkey.toString(),
                 amount: amountBN.toString(),
                 slippage: slippageBN.toString(),
-                tokenAccount: tokenAccount.toString()
+                tokenAccount: tokenAccount.toString(),
+                minSolOutput: minSolOutput.toString()
             });
 
             const instruction = await this.program.methods
-                .sell(amountBN, slippageBN)
+                .sell(amountBN, minSolOutput)
                 .accounts({
-                    tokenMint: mintPubkey,
+                    global: globalAccount.address,
+                    feeRecipient: feeRecipient,
+                    mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    globalState: globalAccount.address,
-                    tokenOwner: sellerPubkey,
-                    tokenAccount: tokenAccount,
-                    feeRecipient: globalAccount.feeRecipient,
+                    associatedBondingCurve: await this.findAssociatedBondingCurveAddress(
+                        sellerPubkey,
+                        mintPubkey
+                    ),
+                    associatedUser: tokenAccount,
+                    user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
-                    tokenProgram: TOKEN_PROGRAM_ID
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                    eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
+                    program: this.program.programId
                 })
                 .instruction();
 
-            // 7. Validate returned instruction
+            // 9. Validate returned instruction
             if (!instruction || !instruction.data) {
                 throw new Error('Invalid instruction generated');
             }
@@ -1854,105 +1850,92 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
 
 
-
 // Then in the sell method:
+    // customPumpSDK.js (sell 相关部分)
     async sell(seller, mint, amount, options = {}) {
         try {
-            // Input validation
+            // 1. 基础验证
             if (!seller || !seller.publicKey) {
-                throw new Error('Seller wallet is required');
+                throw new Error('Invalid seller wallet');
             }
             if (!mint) {
-                throw new Error('Mint address is required');
+                throw new Error('Invalid mint address');
             }
-            if (!amount) {
-                throw new Error('Amount is required');
+            if (!amount || amount <= 0) {
+                throw new Error('Invalid amount');
             }
 
             logger.info('开始卖出操作:', {
                 seller: seller.publicKey.toString(),
-                mint: typeof mint === 'string' ? mint : mint.toString(),
+                mint: mint.toString(),
                 amount: amount.toString(),
                 options: JSON.stringify(options)
             });
 
-            // Convert addresses to PublicKey if needed
-            const mintPubkey = mint instanceof PublicKey ? mint : new PublicKey(mint);
-            const sellerPubkey = seller.publicKey;
-
-            // Get token account address
-            const tokenAccount = await getAssociatedTokenAddress(
-                mintPubkey,
-                sellerPubkey
+            // 2. 获取代币账户
+            const tokenAccount = await this.findAssociatedTokenAddress(
+                seller.publicKey,
+                mint
             );
 
-            // Verify token account exists and has sufficient balance
-            const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
-            if (BigInt(tokenBalance.value.amount) < BigInt(amount)) {
-                throw new Error(`Insufficient token balance. Required: ${amount}, Available: ${tokenBalance.value.amount}`);
+            // 3. 验证代币账户和余额
+            const tokenAccountInfo = await this.connection.getAccountInfo(tokenAccount);
+            if (!tokenAccountInfo) {
+                throw new Error(`Token account ${tokenAccount.toString()} does not exist`);
             }
 
-            // Create transaction
+            const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
+            const availableAmount = BigInt(tokenBalance.value.amount);
+            const sellAmount = BigInt(amount);
+
+            logger.info('代币余额检查:', {
+                account: tokenAccount.toString(),
+                available: availableAmount.toString(),
+                selling: sellAmount.toString(),
+                decimals: tokenBalance.value.decimals
+            });
+
+            if (sellAmount > availableAmount) {
+                throw new Error(
+                    `Insufficient token balance. Available: ${availableAmount}, Trying to sell: ${sellAmount}`
+                );
+            }
+
+            // 4. 创建交易
             const transaction = new Transaction();
 
-            // Add compute budget instruction if needed
+            // 5. 获取指令
+            const sellInstruction = await this.getSellInstructions(
+                seller,
+                mint,
+                sellAmount,
+                options.slippageBasisPoints || 100n
+            );
+
+            if (!sellInstruction) {
+                throw new Error('Failed to create sell instruction');
+            }
+
+            // 6. 添加计算预算指令
             transaction.add(
                 ComputeBudgetProgram.setComputeUnitLimit({
                     units: 400000
                 })
             );
 
-            // Get program derived addresses
-            const [bondingCurve] = await PublicKey.findProgramAddress(
-                [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
-                new PublicKey(this.PROGRAM_ID)
-            );
-
-            const [globalAddress] = await PublicKey.findProgramAddress(
-                [Buffer.from('global')],
-                new PublicKey(this.PROGRAM_ID)
-            );
-
-            // Get global state account
-            const globalAccountInfo = await this.connection.getAccountInfo(globalAddress);
-            if (!globalAccountInfo) {
-                throw new Error('Global account not found');
-            }
-
-            // Get fee recipient from global account
-            const feeRecipient = new PublicKey(globalAccountInfo.data.slice(33, 65));
-
-            // Create sell instruction
-            const sellInstruction = new TransactionInstruction({
-                programId: new PublicKey(this.PROGRAM_ID),
-                keys: [
-                    { pubkey: mintPubkey, isSigner: false, isWritable: true },
-                    { pubkey: bondingCurve, isSigner: false, isWritable: true },
-                    { pubkey: globalAddress, isSigner: false, isWritable: false },
-                    { pubkey: sellerPubkey, isSigner: true, isWritable: true },
-                    { pubkey: tokenAccount, isSigner: false, isWritable: true },
-                    { pubkey: feeRecipient, isSigner: false, isWritable: true },
-                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
-                ],
-                data: Buffer.concat([
-                    Buffer.from([0x02]), // sell instruction discriminator
-                    Buffer.from(new BN(amount).toArray('le', 8)),
-                    Buffer.from(new BN(options.slippageBasisPoints || 100).toArray('le', 2))
-                ])
-            });
-
+            // 7. 添加卖出指令
             transaction.add(sellInstruction);
 
-            // Get latest blockhash
+            // 8. 获取最新的 blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
             transaction.recentBlockhash = blockhash;
             transaction.lastValidBlockHeight = lastValidBlockHeight;
-            transaction.feePayer = sellerPubkey;
+            transaction.feePayer = seller.publicKey;
 
-            // Simulate transaction
+            // 9. 模拟交易
+            logger.info('模拟交易...');
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller],
@@ -1964,16 +1947,25 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             );
 
             if (simulation.value.err) {
-                throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
+                const logs = simulation.value.logs || [];
+                logger.error('交易模拟失败:', {
+                    error: simulation.value.err,
+                    logs: logs,
+                    seller: seller.publicKey.toString(),
+                    mint: mint.toString()
+                });
+                throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
             }
 
-            // Send and confirm transaction
+            // 10. 发送交易
+            logger.info('发送交易...');
             const signature = await sendAndConfirmTransaction(
                 this.connection,
                 transaction,
                 [seller],
                 {
                     skipPreflight: false,
+                    preflightCommitment: 'confirmed',
                     commitment: 'confirmed',
                     maxRetries: 3
                 }
@@ -1981,16 +1973,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             logger.info('卖出交易成功:', {
                 signature,
-                seller: sellerPubkey.toString(),
-                amount: amount.toString()
+                seller: seller.publicKey.toString(),
+                amount: sellAmount.toString()
             });
 
             return {
                 success: true,
                 signature,
-                amount: amount.toString(),
-                mint: mintPubkey.toString(),
-                seller: sellerPubkey.toString(),
+                amount: sellAmount.toString(),
+                mint: mint.toString(),
+                seller: seller.publicKey.toString(),
                 timestamp: new Date().toISOString()
             };
 
@@ -2005,6 +1997,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;
         }
     }
+
+
 
 // 辅助方法：检查账户是否存在
     async checkAccountExists(address) {

@@ -197,50 +197,73 @@ export class TokenTradeService {
 // In TokenTradeService class (tokenTradeService.js)
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         try {
-            // 1. 获取钱包 Keypair
+            // 1. 获取钱包
             const keypair = await this.solanaService.walletService.getWalletKeypair(groupType, accountNumber);
             if (!keypair) {
                 throw new Error('Wallet not found');
             }
 
-            // 2. 获取代币余额
-            const tokenBalance = await this.solanaService.getTokenBalance(
-                keypair.publicKey.toString(),
-                tokenAddress
-            );
-            const sellAmount = BigInt(Math.floor(Number(tokenBalance) * (percentage / 100)));
+            // 2. 获取代币信息和余额
+            const [tokenInfo, tokenBalance] = await Promise.all([
+                this.getTokenInfo(tokenAddress),
+                this.solanaService.getTokenBalance(
+                    keypair.publicKey.toString(),
+                    tokenAddress
+                )
+            ]);
 
+            // 3. 计算卖出数量
+            const rawBalance = BigInt(tokenBalance.value.amount);
+            const percentageBN = BigInt(Math.floor(percentage * 100));
+            const sellAmount = (rawBalance * percentageBN) / BigInt(10000);
+
+            logger.info('计算卖出数量:', {
+                tokenAddress,
+                rawBalance: rawBalance.toString(),
+                percentage,
+                sellAmount: sellAmount.toString(),
+                decimals: tokenBalance.value.decimals
+            });
+
+            // 4. 验证数量
             if (sellAmount <= 0n) {
                 throw new Error('Invalid sell amount');
             }
 
-            logger.info('开始卖出代币:', {
-                wallet: keypair.publicKey.toString(),
-                token: tokenAddress,
-                amount: sellAmount.toString(),
-                percentage: `${percentage}%`
-            });
+            const validation = await this.validateTokenBalance(
+                keypair,
+                tokenAddress,
+                sellAmount
+            );
 
-            // 3. 执行卖出操作
+            if (!validation.isValid) {
+                throw new Error(
+                    `Insufficient balance. Available: ${validation.available}, Required: ${validation.required}`
+                );
+            }
+
+            // 5. 创建 SDK 实例
             const sdk = new CustomPumpSDK(this.solanaService.connection);
             sdk.setSolanaService(this.solanaService);
 
+            // 6. 执行卖出
             const result = await sdk.sell(
                 keypair,
-                tokenAddress,
+                new PublicKey(tokenAddress),
                 sellAmount,
                 {
                     ...options,
-                    slippageBasisPoints: options.slippage ? options.slippage * 100 : 100
+                    slippageBasisPoints: options.slippage ? BigInt(options.slippage * 100) : 100n,
+                    decimals: tokenInfo.decimals
                 }
             );
 
-            // 4. 验证结果
+            // 7. 验证结果
             if (!result || !result.signature) {
-                throw new Error('交易执行失败: 未收到有效的交易签名');
+                throw new Error('Transaction failed: No signature received');
             }
 
-            // 5. 保存交易记录
+            // 8. 保存交易记录
             await this.saveTradeTransaction({
                 signature: result.signature,
                 mint: tokenAddress,
@@ -248,19 +271,25 @@ export class TokenTradeService {
                 type: 'sell',
                 amount: sellAmount.toString(),
                 tokenAmount: sellAmount.toString(),
-                tokenDecimals: 0, // 或从代币信息中获取
+                tokenDecimals: tokenInfo.decimals,
                 metadata: {
                     percentage,
-                    options
+                    options,
+                    rawBalance: rawBalance.toString(),
+                    validation
                 }
             });
+
+            // 9. 更新余额缓存
+            await this.updateBalanceCache(keypair, tokenAddress);
 
             return {
                 success: true,
                 signature: result.signature,
                 amount: sellAmount.toString(),
                 owner: keypair.publicKey.toString(),
-                mint: tokenAddress
+                mint: tokenAddress,
+                tokenDecimals: tokenInfo.decimals
             };
 
         } catch (error) {
@@ -275,7 +304,17 @@ export class TokenTradeService {
                 },
                 stack: error.stack
             });
+
+            // 保存失败记录
+            await this.saveFailedTransaction({
+                mint: tokenAddress,
+                owner: keypair?.publicKey?.toString(),
+                type: 'sell',
+                error
+            });
+
             throw error;
         }
     }
+
 } 
