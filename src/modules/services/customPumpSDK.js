@@ -1820,7 +1820,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
     async ensureAssociatedBondingCurveExists(user, mint) {
         try {
-            // Convert parameters to PublicKey objects if needed
+            // 基础参数验证和转换
             const userPubkey = this.ensurePublicKey(user);
             const mintPubkey = this.ensurePublicKey(mint);
 
@@ -1829,17 +1829,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mint: mintPubkey.toString()
             });
 
-            // Find the associated bonding curve address
+            // 修改：只使用mint地址来查找bonding curve
             const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
                 [
                     Buffer.from('associated-bonding-curve'),
-                    userPubkey.toBuffer(),
                     mintPubkey.toBuffer()
                 ],
                 this.program.programId
             );
 
-            // Check if account exists
+            // 检查账户是否存在
             const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
 
             if (accountInfo) {
@@ -1854,50 +1853,48 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 address: associatedBondingCurveAddress.toString()
             });
 
-            // Make a minimal buy to initialize the account
-            const minimalBuyAmount = BigInt(10000); // Increased from 1000 to 10000 lamports (0.00001 SOL)
+            // 最小购买金额增加以确保成功
+            const minimalBuyAmount = BigInt(20000); // 0.00002 SOL
 
-            // Create buy transaction
+            // 创建交易
             const transaction = new Transaction();
 
-            // Add compute budget instruction with higher limit
+            // 增加计算预算
             transaction.add(
                 ComputeBudgetProgram.setComputeUnitLimit({
-                    units: 400000 // Increased from 300000
+                    units: 400000
                 })
             );
 
-            // Add priority fee to ensure faster processing
+            // 增加优先级费用
             transaction.add(
                 ComputeBudgetProgram.setComputeUnitPrice({
-                    microLamports: 50000 // Add 50,000 microLamports priority fee
+                    microLamports: 100000 // 增加优先级费用以确保更快处理
                 })
             );
 
-            // We use the buy instruction to trigger the initialization
+            // 获取购买指令
             const buyInstructions = await super.getBuyInstructionsBySolAmount(
                 userPubkey,
                 mintPubkey,
                 minimalBuyAmount,
-                100n, // 1% slippage
+                250n, // 增加滑点到2.5%
                 'confirmed'
             );
 
-            // Add the instructions from the buyTx to our transaction
+            // 添加指令到交易
             if (Array.isArray(buyInstructions.instructions)) {
                 buyInstructions.instructions.forEach(ix => transaction.add(ix));
             } else if (buyInstructions.instructions) {
-                // If it's a transaction object with instructions property
                 buyInstructions.instructions.forEach(ix => transaction.add(ix));
             } else if (buyInstructions.add) {
-                // If it's a transaction object itself
                 const txInstructions = buyInstructions._instructions ||
                     buyInstructions.instructions ||
                     [];
                 txInstructions.forEach(ix => transaction.add(ix));
             }
 
-            // Set transaction details
+            // 获取最新的区块哈希
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -1905,13 +1902,13 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = userPubkey instanceof PublicKey ? userPubkey : user.publicKey;
 
-            // Determine signers
+            // 确定签名者
             let signers = [];
             if (user.secretKey || user.keypair) {
                 signers.push(user);
             }
 
-            // Send the transaction
+            // 发送交易
             const signature = await this.sendTransactionWithLogs(
                 this.connection,
                 transaction,
@@ -1920,7 +1917,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     skipPreflight: false,
                     preflightCommitment: 'confirmed',
                     commitment: 'confirmed',
-                    maxRetries: 5 // Increased from 3
+                    maxRetries: 5
                 }
             );
 
@@ -1929,18 +1926,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 associatedBondingCurve: associatedBondingCurveAddress.toString()
             });
 
-            // Wait longer and retry verification multiple times
-            const maxVerificationRetries = 5;
+            // 增加验证重试次数和等待时间
+            const maxVerificationRetries = 8; // 增加重试次数
             let verificationRetry = 0;
             let accountCreated = false;
 
             while (verificationRetry < maxVerificationRetries && !accountCreated) {
-                // Increase wait time between retries
-                const waitTime = 3000 + (verificationRetry * 2000); // 3s, 5s, 7s, 9s, 11s
+                const waitTime = 4000 + (verificationRetry * 2000); // 4s, 6s, 8s...
                 logger.info(`Waiting ${waitTime/1000}s for account creation (attempt ${verificationRetry+1}/${maxVerificationRetries})...`);
                 await new Promise(resolve => setTimeout(resolve, waitTime));
 
-                // Verify the account was created
                 const updatedInfo = await this.connection.getAccountInfo(
                     associatedBondingCurveAddress,
                     'confirmed'
@@ -1963,98 +1958,11 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             }
 
             if (!accountCreated) {
-                // As a fallback, try a direct sell with a tiny amount
-                logger.info('Trying alternate approach: direct sell with minimal amount');
-
-                // Get token balance first
-                const tokenAccount = await this.findAssociatedTokenAddress(userPubkey, mintPubkey);
-                let tokenBalance;
-                try {
-                    tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
-                    if (tokenBalance && tokenBalance.value.amount && BigInt(tokenBalance.value.amount) > 0) {
-                        // Try selling a tiny amount (0.1% of balance)
-                        const minSellAmount = (BigInt(tokenBalance.value.amount) * BigInt(1)) / BigInt(1000);
-                        if (minSellAmount > 0) {
-                            const sellTx = new Transaction();
-
-                            // Add compute budget instructions
-                            sellTx.add(
-                                ComputeBudgetProgram.setComputeUnitLimit({
-                                    units: 400000
-                                })
-                            );
-
-                            sellTx.add(
-                                ComputeBudgetProgram.setComputeUnitPrice({
-                                    microLamports: 100000 // Higher priority fee for this fallback
-                                })
-                            );
-
-                            // Get sell instructions
-                            const { instructions } = await this.getSellInstructions(
-                                userPubkey,
-                                mintPubkey,
-                                new BN(minSellAmount.toString()),
-                                2000n // 20% slippage for better chance of success
-                            );
-
-                            // Add instructions to transaction
-                            instructions.forEach(ix => sellTx.add(ix));
-
-                            // Set transaction details
-                            const { blockhash, lastValidBlockHeight } =
-                                await this.connection.getLatestBlockhash('confirmed');
-
-                            sellTx.recentBlockhash = blockhash;
-                            sellTx.lastValidBlockHeight = lastValidBlockHeight;
-                            sellTx.feePayer = transaction.feePayer;
-
-                            // Send transaction
-                            const sellSignature = await this.sendTransactionWithLogs(
-                                this.connection,
-                                sellTx,
-                                signers,
-                                {
-                                    skipPreflight: false,
-                                    preflightCommitment: 'confirmed',
-                                    commitment: 'confirmed',
-                                    maxRetries: 3
-                                }
-                            );
-
-                            logger.info('Minimal sell transaction sent as fallback', {
-                                signature: sellSignature
-                            });
-
-                            // Wait for confirmation
-                            await new Promise(resolve => setTimeout(resolve, 5000));
-
-                            // Check again
-                            const finalCheck = await this.connection.getAccountInfo(
-                                associatedBondingCurveAddress,
-                                'confirmed'
-                            );
-
-                            if (finalCheck) {
-                                accountCreated = true;
-                                logger.info('Associated bonding curve created via fallback method', {
-                                    address: associatedBondingCurveAddress.toString()
-                                });
-                            }
-                        }
-                    }
-                } catch (tokenError) {
-                    logger.warn('Token balance check failed in fallback', {
-                        error: tokenError.message
-                    });
-                }
-            }
-
-            if (!accountCreated) {
                 throw new Error('Failed to initialize associated bonding curve after multiple attempts');
             }
 
             return true;
+
         } catch (error) {
             logger.error('Failed to ensure associated bonding curve exists', {
                 error: error.message,
@@ -2062,8 +1970,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mint: mint?.toString(),
                 stack: error.stack
             });
-
-            // We'll return false instead of throwing, and let the sell method handle this
             return false;
         }
     }
