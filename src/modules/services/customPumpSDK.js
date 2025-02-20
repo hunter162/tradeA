@@ -1773,8 +1773,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             // 5. Calculate minimum SOL output
             const calculatedSolOutput = await this.calculateSellSolOutput(mintPubkey, amountBN);
-
-            // Ensure calculatedSolOutput is a BN
             const solOutputBN = BN.isBN(calculatedSolOutput) ?
                 calculatedSolOutput :
                 new BN(calculatedSolOutput.toString());
@@ -1785,33 +1783,67 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 slippageBN
             );
 
-            // Convert the result to BN if it's not already
             const minSolOutputBN = BN.isBN(minSolOutput) ?
                 minSolOutput :
                 new BN(minSolOutput.toString());
 
-            logger.info('Building sell instruction:', {
-                seller: sellerPubkey.toString(),
-                mint: mintPubkey.toString(),
-                amount: amountBN.toString(),
-                minSolOutput: minSolOutputBN.toString(),
-                tokenAccount: tokenAccount.toString(),
-                slippage: slippageBN.toString(),
-                timestamp: new Date().toISOString()
-            });
+            // 6. Find associated bonding curve address
+            const associatedBondingCurveAddress = await this.findAssociatedBondingCurveAddress(
+                sellerPubkey,
+                mintPubkey
+            );
 
-            // 6. Build instruction
-            const instruction = await this.program.methods
+            // 7. Build instructions array
+            const instructions = [];
+
+            // Add compute budget instruction for adequate compute units
+            instructions.push(
+                ComputeBudgetProgram.setComputeUnitLimit({
+                    units: 400000
+                })
+            );
+
+            // Check if associated bonding curve account exists
+            const associatedBondingCurveInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
+
+            if (!associatedBondingCurveInfo) {
+                // Create associated bonding curve account
+                const space = 128; // Adjust size based on your account structure
+                const rent = await this.connection.getMinimumBalanceForRentExemption(space);
+
+                const createAccountIx = SystemProgram.createAccount({
+                    fromPubkey: sellerPubkey,
+                    newAccountPubkey: associatedBondingCurveAddress,
+                    lamports: rent,
+                    space: space,
+                    programId: this.program.programId
+                });
+
+                instructions.push(createAccountIx);
+
+                // Initialize associated bonding curve account
+                const initAssociatedBondingCurveIx = await this.program.methods
+                    .initializeAssociatedBondingCurve()
+                    .accounts({
+                        bondingCurve: bondingCurveAddress,
+                        associatedBondingCurve: associatedBondingCurveAddress,
+                        user: sellerPubkey,
+                        systemProgram: SystemProgram.programId
+                    })
+                    .instruction();
+
+                instructions.push(initAssociatedBondingCurveIx);
+            }
+
+            // 8. Add sell instruction
+            const sellInstruction = await this.program.methods
                 .sell(amountBN, minSolOutputBN)
                 .accounts({
                     global: globalAccount.address,
                     feeRecipient: globalAccount.feeRecipient,
                     mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: await this.findAssociatedBondingCurveAddress(
-                        sellerPubkey,
-                        mintPubkey
-                    ),
+                    associatedBondingCurve: associatedBondingCurveAddress,
                     associatedUser: tokenAccount,
                     user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
@@ -1821,15 +1853,21 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 })
                 .instruction();
 
-            // 7. Validate instruction
-            if (!instruction || !instruction.data) {
-                throw new Error('Invalid instruction generated');
-            }
+            instructions.push(sellInstruction);
 
-            return instruction;
+            logger.info('Sell instructions created:', {
+                instructionCount: instructions.length,
+                hasAssociatedBondingCurve: !!associatedBondingCurveInfo,
+                seller: sellerPubkey.toString(),
+                mint: mintPubkey.toString(),
+                amount: amountBN.toString(),
+                minSolOutput: minSolOutputBN.toString()
+            });
+
+            return instructions;
 
         } catch (error) {
-            logger.error('Failed to create sell instruction:', {
+            logger.error('Failed to create sell instructions:', {
                 error: error.message,
                 seller: seller?.toString?.(),
                 mint: mint?.toString?.(),
@@ -1893,7 +1931,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     // customPumpSDK.js
     async sell(seller, mint, amount, options = {}) {
         try {
-            // 1. 基础验证
+            // 1. Basic validation
             if (!seller || !seller.publicKey) {
                 throw new Error('Invalid seller wallet');
             }
@@ -1904,10 +1942,9 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Invalid amount');
             }
 
-            // 将 BigInt 转换为字符串用于日志记录
             const amountStr = amount.toString();
 
-            logger.info('开始卖出操作:', {
+            logger.info('Starting sell operation:', {
                 seller: seller.publicKey.toString(),
                 mint: mint.toString(),
                 amount: amountStr,
@@ -1917,13 +1954,12 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             });
 
-            // 2. 获取代币账户
+            // 2. Get token account and verify balance
             const tokenAccount = await this.findAssociatedTokenAddress(
                 seller.publicKey,
                 mint
             );
 
-            // 3. 验证代币账户和余额
             const tokenAccountInfo = await this.connection.getAccountInfo(tokenAccount);
             if (!tokenAccountInfo) {
                 throw new Error(`Token account ${tokenAccount.toString()} does not exist`);
@@ -1932,45 +1968,27 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
             const availableAmount = BigInt(tokenBalance.value.amount);
 
-            logger.info('代币余额检查:', {
-                account: tokenAccount.toString(),
-                available: availableAmount.toString(),
-                selling: amountStr,
-                decimals: tokenBalance.value.decimals
-            });
-
             if (amount > availableAmount) {
                 throw new Error(
                     `Insufficient token balance. Available: ${availableAmount.toString()}, Trying to sell: ${amountStr}`
                 );
             }
 
-            // 4. 创建交易
+            // 3. Create transaction
             const transaction = new Transaction();
 
-            // 5. 获取指令
-            const sellInstruction = await this.getSellInstructions(
+            // 4. Get all necessary instructions
+            const instructions = await this.getSellInstructions(
                 seller,
                 mint,
                 amount,
                 options.slippageBasisPoints || 100n
             );
 
-            if (!sellInstruction) {
-                throw new Error('Failed to create sell instruction');
-            }
+            // 5. Add all instructions to transaction
+            instructions.forEach(instruction => transaction.add(instruction));
 
-            // 6. 添加计算预算指令
-            transaction.add(
-                ComputeBudgetProgram.setComputeUnitLimit({
-                    units: 400000
-                })
-            );
-
-            // 7. 添加卖出指令
-            transaction.add(sellInstruction);
-
-            // 8. 获取最新的 blockhash
+            // 6. Get latest blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -1978,8 +1996,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 9. 模拟交易
-            logger.info('模拟交易...');
+            // 7. Simulate transaction
+            logger.info('Simulating transaction...');
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller],
@@ -1992,17 +2010,17 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             if (simulation.value.err) {
                 const logs = simulation.value.logs || [];
-                logger.error('交易模拟失败:', {
+                logger.error('Transaction simulation failed:', {
                     error: simulation.value.err,
                     logs: logs,
                     seller: seller.publicKey.toString(),
                     mint: mint.toString()
                 });
-                throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
+                throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
             }
 
-            // 10. 发送交易
-            logger.info('发送交易...');
+            // 8. Send and confirm transaction
+            logger.info('Sending transaction...');
             const signature = await sendAndConfirmTransaction(
                 this.connection,
                 transaction,
@@ -2015,7 +2033,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             );
 
-            logger.info('卖出交易成功:', {
+            logger.info('Sell transaction successful:', {
                 signature,
                 seller: seller.publicKey.toString(),
                 amount: amountStr
@@ -2031,7 +2049,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             };
 
         } catch (error) {
-            logger.error('卖出操作失败:', {
+            logger.error('Sell operation failed:', {
                 error: error.message,
                 seller: seller?.publicKey?.toString(),
                 mint: mint?.toString(),
