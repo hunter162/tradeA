@@ -1986,7 +1986,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     }
     async calculateSellSolOutput(mint, tokenAmount) {
         try {
-            // Get the bonding curve account
             const bondingCurveAddress = await this.findBondingCurveAddress(mint);
             const bondingCurveAccount = await this.program.account.bondingCurve.fetch(bondingCurveAddress);
 
@@ -1997,27 +1996,36 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             // Convert tokenAmount to BN if it isn't already
             const tokenAmountBN = BN.isBN(tokenAmount) ? tokenAmount : new BN(tokenAmount.toString());
 
-            // Calculate virtual SOL reserves after sale
-            const newVirtualTokenReserves = new BN(bondingCurveAccount.virtualTokenReserves.toString())
-                .sub(tokenAmountBN);
+            // Get current reserves
+            const currentVirtualTokenReserves = new BN(bondingCurveAccount.virtualTokenReserves.toString());
+            const currentVirtualSolReserves = new BN(bondingCurveAccount.virtualSolReserves.toString());
 
-            const virtualSolReservesBN = new BN(bondingCurveAccount.virtualSolReserves.toString());
-            const k = virtualSolReservesBN.mul(new BN(bondingCurveAccount.virtualTokenReserves.toString()));
+            // Calculate new virtual token reserves after sale
+            const newVirtualTokenReserves = currentVirtualTokenReserves.sub(tokenAmountBN);
+            if (newVirtualTokenReserves.lten(0)) {
+                throw new Error('Sale would deplete token reserves');
+            }
+
+            // Calculate constant product (k)
+            const k = currentVirtualSolReserves.mul(currentVirtualTokenReserves);
 
             // Calculate new SOL reserves using constant product formula
             const newVirtualSolReserves = k.div(newVirtualTokenReserves);
 
             // Calculate SOL output
-            const solOutput = newVirtualSolReserves.sub(virtualSolReservesBN);
+            const solOutput = newVirtualSolReserves.sub(currentVirtualSolReserves);
 
             logger.debug('Sell output calculation:', {
                 tokenAmount: tokenAmountBN.toString(),
-                currentVirtualTokenReserves: bondingCurveAccount.virtualTokenReserves.toString(),
-                currentVirtualSolReserves: bondingCurveAccount.virtualSolReserves.toString(),
+                currentVirtualTokenReserves: currentVirtualTokenReserves.toString(),
+                currentVirtualSolReserves: currentVirtualSolReserves.toString(),
+                newVirtualTokenReserves: newVirtualTokenReserves.toString(),
+                newVirtualSolReserves: newVirtualSolReserves.toString(),
                 calculatedSolOutput: solOutput.toString()
             });
 
             return solOutput;
+
         } catch (error) {
             logger.error('Failed to calculate sell output:', {
                 error: error.message,
