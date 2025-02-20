@@ -1743,7 +1743,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const bondingCurveAddress = await this.findBondingCurveAddress(mint);
             const globalAccount = await this.getGlobalAccount();
 
-            // Create the associated bonding curve account
+            // Find associated bonding curve address
             const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
                 [
                     Buffer.from('associated-bonding-curve'),
@@ -1753,15 +1753,17 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 this.program.programId
             );
 
-            // Build initialization instruction
+            // Create generic 'initialize' instruction for the associated bonding curve
             const initInstruction = await this.program.methods
-                .initializeAssociatedBondingCurve()
+                .initialize()  // Use the generic initialize method
                 .accounts({
                     global: globalAccount.address,
                     bondingCurve: bondingCurveAddress,
                     associatedBondingCurve: associatedBondingCurveAddress,
                     user: user.publicKey,
                     systemProgram: SystemProgram.programId,
+                    eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
+                    program: this.program.programId
                 })
                 .instruction();
 
@@ -1769,7 +1771,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const tx = new Transaction();
             tx.add(initInstruction);
 
-            // Add compute budget instruction to ensure enough compute units
+            // Add compute budget instruction
             tx.add(
                 ComputeBudgetProgram.setComputeUnitLimit({
                     units: 400000
@@ -1816,7 +1818,129 @@ async sendTransactionViaNozomi(transaction, signers, config) {
         }
     }
 
+    async ensureAssociatedBondingCurveExists(user, mint) {
+        try {
+            // Convert parameters to PublicKey objects if needed
+            const userPubkey = this.ensurePublicKey(user);
+            const mintPubkey = this.ensurePublicKey(mint);
 
+            logger.info('Checking associated bonding curve', {
+                user: userPubkey.toString(),
+                mint: mintPubkey.toString()
+            });
+
+            // Find the associated bonding curve address
+            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('associated-bonding-curve'),
+                    userPubkey.toBuffer(),
+                    mintPubkey.toBuffer()
+                ],
+                this.program.programId
+            );
+
+            // Check if account exists
+            const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
+
+            if (accountInfo) {
+                logger.info('Associated bonding curve already exists', {
+                    address: associatedBondingCurveAddress.toString()
+                });
+                return true;
+            }
+
+            logger.info('Associated bonding curve does not exist, making a minimal buy to initialize');
+
+            // Get the bonding curve address
+            const bondingCurveAddress = await this.findBondingCurveAddress(mintPubkey);
+
+            // Make a minimal buy to initialize the account
+            // This is a workaround - we'll make a tiny purchase to have the program initialize the account
+            const minimalBuyAmount = BigInt(1000); // 0.000001 SOL (1000 lamports)
+
+            // Create buy transaction
+            const transaction = new Transaction();
+
+            // Add compute budget instruction
+            transaction.add(
+                ComputeBudgetProgram.setComputeUnitLimit({
+                    units: 300000
+                })
+            );
+
+            // We use the buy instruction to trigger the initialization
+            const buyInstructions = await super.getBuyInstructionsBySolAmount(
+                userPubkey,
+                mintPubkey,
+                minimalBuyAmount,
+                100n, // 1% slippage
+                'confirmed'
+            );
+
+            // Add the instructions from the buyTx to our transaction
+            if (Array.isArray(buyInstructions.instructions)) {
+                buyInstructions.instructions.forEach(ix => transaction.add(ix));
+            } else {
+                // If it's a transaction, add its instructions
+                buyInstructions.instructions?.forEach(ix => transaction.add(ix));
+            }
+
+            // Set transaction details
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('confirmed');
+
+            transaction.recentBlockhash = blockhash;
+            transaction.lastValidBlockHeight = lastValidBlockHeight;
+
+            if (userPubkey instanceof PublicKey) {
+                transaction.feePayer = userPubkey;
+            } else if (user.publicKey) {
+                transaction.feePayer = user.publicKey;
+            }
+
+            // Send the transaction
+            let signers = [];
+            if (user.secretKey || user.keypair) {
+                signers.push(user);
+            }
+
+            const signature = await this.sendTransactionWithLogs(
+                this.connection,
+                transaction,
+                signers,
+                {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                    commitment: 'confirmed',
+                    maxRetries: 3
+                }
+            );
+
+            logger.info('Minimal buy transaction sent to initialize associated bonding curve', {
+                signature,
+                associatedBondingCurve: associatedBondingCurveAddress.toString()
+            });
+
+            // Wait for confirmation
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            // Verify the account was created
+            const updatedInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
+            if (!updatedInfo) {
+                throw new Error('Failed to initialize associated bonding curve after buy transaction');
+            }
+
+            return true;
+        } catch (error) {
+            logger.error('Failed to ensure associated bonding curve exists', {
+                error: error.message,
+                user: user?.publicKey?.toString() || user?.toString(),
+                mint: mint?.toString(),
+                stack: error.stack
+            });
+            return false;
+        }
+    }
     async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
         try {
             // 1. Input validation
@@ -2077,29 +2201,14 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             });
 
-            // 2. Check if associated bonding curve exists
-            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
-                [
-                    Buffer.from('associated-bonding-curve'),
-                    seller.publicKey.toBuffer(),
-                    mintPubkey.toBuffer()
-                ],
-                this.program.programId
+            // 2. Ensure associated bonding curve exists
+            const associatedBondingCurveExists = await this.ensureAssociatedBondingCurveExists(
+                seller,
+                mintPubkey
             );
 
-            // Check if account exists
-            const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
-
-            // If account doesn't exist, initialize it first
-            if (!accountInfo) {
-                logger.info('Associated bonding curve not found, initializing first...', {
-                    address: associatedBondingCurveAddress.toString()
-                });
-
-                await this.initializeAssociatedBondingCurve(seller, mintPubkey);
-
-                // Wait a moment for the account to be confirmed
-                await new Promise(resolve => setTimeout(resolve, 2000));
+            if (!associatedBondingCurveExists) {
+                throw new Error('Could not initialize associated bonding curve');
             }
 
             // 3. Check token balance
