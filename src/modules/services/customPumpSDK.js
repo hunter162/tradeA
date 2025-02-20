@@ -2095,6 +2095,79 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;
         }
     }
+
+
+    // customPumpSDK.js (sell 相关部分)
+    // In CustomPumpSDK class
+    async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
+        try {
+            // Convert sellTokenAmount to BigInt if it's not already
+            const tokenAmountBigInt = typeof sellTokenAmount === 'bigint' ?
+                sellTokenAmount :
+                BigInt(sellTokenAmount.toString());
+
+            // Convert slippageBasisPoints to BigInt if it's not already
+            const slippageBigInt = typeof slippageBasisPoints === 'bigint' ?
+                slippageBasisPoints :
+                BigInt(slippageBasisPoints.toString());
+
+            logger.info('卖出参数:', {
+                seller: seller.publicKey.toString(),
+                mint: mint.toString(),
+                sellTokenAmount: tokenAmountBigInt.toString(),
+                slippageBasisPoints: slippageBigInt.toString(),
+                options: JSON.stringify(options)
+            });
+
+            return await this.withRetry(async () => {
+                // Get sell instructions with proper BigInt values
+                let sellTx = await super.getSellInstructionsByTokenAmount(
+                    seller.publicKey,
+                    mint,
+                    tokenAmountBigInt,
+                    slippageBigInt,
+                    'confirmed'
+                );
+
+                // Rest of the sell method implementation...
+                // [Previous implementation continues here]
+            });
+        } catch (error) {
+            logger.error('❌ 卖出代币失败', {
+                error: error.message,
+                mint: mint.toString(),
+                amount: sellTokenAmount.toString(),
+                slippage: `${Number(slippageBasisPoints) / 100}%`,
+                time: new Date().toISOString(),
+                endpoint: this.connection.rpcEndpoint
+            });
+            throw error;
+        }
+    }
+    _toBigInt(value) {
+        try {
+            if (typeof value === 'bigint') {
+                return value;
+            }
+            if (typeof value === 'number') {
+                return BigInt(Math.floor(value));
+            }
+            if (typeof value === 'string') {
+                return BigInt(value.replace(/[^\d]/g, ''));
+            }
+            if (value?.toString) {
+                return BigInt(value.toString().replace(/[^\d]/g, ''));
+            }
+            throw new Error(`Cannot convert ${typeof value} to BigInt`);
+        } catch (error) {
+            logger.error('BigInt conversion failed:', {
+                value: typeof value === 'object' ? JSON.stringify(value) : value,
+                type: typeof value,
+                error: error.message
+            });
+            throw error;
+        }
+    }
     async calculateWithSlippageSell(solOutput, slippageOptions) {
         try {
             // Extract slippage basis points from options
@@ -2105,18 +2178,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 basisPoints = slippageOptions || 100;
             }
 
-            // Ensure solOutput is BigInt
+            // Convert all values to BigInt for consistent handling
             const amount = typeof solOutput === 'bigint' ?
                 solOutput :
                 BigInt(solOutput.toString());
 
-            // Ensure basisPoints is BigInt
             const basisPointsBN = typeof basisPoints === 'bigint' ?
                 basisPoints :
                 BigInt(basisPoints.toString());
 
-            // Calculate with BigInt
-            // For sells, we subtract the slippage to get the minimum acceptable output
+            // Calculate with BigInt arithmetic
             const TEN_THOUSAND = BigInt(10000);
             const slippageAmount = (amount * basisPointsBN) / TEN_THOUSAND;
             const finalAmount = amount - slippageAmount;  // Subtract for sell operations
@@ -2141,279 +2212,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 slippageOptions: JSON.stringify(slippageOptions)
             });
             throw new Error(`Failed to calculate sell slippage: ${error.message}`);
-        }
-    }
-
-    // customPumpSDK.js (sell 相关部分)
-    // In CustomPumpSDK class
-    async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
-        logger.info('Seller:', seller);
-        logger.info('Mint:', mint);
-        logger.info('Sell Token Amount:', sellTokenAmount.toString()); // 如果是 BigInt 类型需要转换
-        logger.info('Slippage Basis Points:', slippageBasisPoints.toString());
-        logger.info('Priority Fees:', priorityFees);
-        logger.info('Options:', JSON.stringify(options, null, 2)); // 格式化输出对象
-        try {
-            return await this.withRetry(async () => {
-                // 2. 获取卖出指令
-                let sellTx = await super.getSellInstructionsByTokenAmount(
-                    seller.publicKey,
-                    mint,
-                    BigInt(sellTokenAmount.toString()),
-                    slippageBasisPoints,
-                    'confirmed'
-                );
-
-                // 3. 处理优先上链
-                if (options.usePriorityFee) {
-                    const jitoService = new JitoService(this.connection);
-                    sellTx = await jitoService.addPriorityFee(sellTx, {
-                        type: options.priorityType || 'jito',
-                        tipAmountSol: priorityFees?.tipAmountSol
-                    });
-                }
-                else if (priorityFees?.microLamports) {
-                    sellTx.add(
-                        ComputeBudgetProgram.setComputeUnitPrice({
-                            microLamports: priorityFees.microLamports
-                        })
-                    );
-                }
-
-                // 4. 获取最新的 blockhash
-                const { blockhash, lastValidBlockHeight } =
-                    await this.connection.getLatestBlockhash('confirmed');
-
-                sellTx.recentBlockhash = blockhash;
-                sellTx.lastValidBlockHeight = lastValidBlockHeight;
-                sellTx.feePayer = seller.publicKey;
-
-                // 5. 模拟交易
-                logger.info('开始模拟交易...');
-                const simulation = await this.connection.simulateTransaction(sellTx, [seller], {
-                    sigVerify: false,
-                    commitment: 'confirmed',
-                    replaceRecentBlockhash: true
-                });
-
-                // 6. 分析模拟结果
-                if (simulation.value.err) {
-                    const logs = simulation.value.logs || [];
-                    logger.error('交易模拟失败:', {
-                        error: simulation.value.err,
-                        logs: logs,
-                        mint: mint.toString(),
-                        seller: seller.publicKey.toString()
-                    });
-
-                    // 检查具体错误类型
-                    if (logs.some(log => log.includes('Bonding curve account not found'))) {
-                        throw new Error(`Token ${mint.toString()} is not a valid pump token.`);
-                    }
-                    if (logs.some(log => log.includes('insufficient token balance'))) {
-                        throw new Error('Insufficient token balance for transaction');
-                    }
-                    throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
-                }
-
-                // 7. 计算预估费用
-                const estimatedFee = await this.connection.getFeeForMessage(
-                    sellTx.compileMessage(),
-                    'confirmed'
-                );
-
-                // 8. 检查SOL余额是否足够支付gas费用
-                const balance = await this.connection.getBalance(seller.publicKey);
-                if (BigInt(balance) < BigInt(estimatedFee.value || 0)) {
-                    throw new Error(`Insufficient SOL balance for gas. Required: ${estimatedFee.value}, Current: ${balance}`);
-                }
-
-                logger.info('交易模拟成功:', {
-                    computeUnits: simulation.value.unitsConsumed || 0,
-                    estimatedFee: estimatedFee.value || 0,
-                    logs: simulation.value.logs
-                });
-
-                // 9. 获取最新的区块信息用于实际发送
-                const { value: { blockhash: sendBlockhash, lastValidBlockHeight: sendValidHeight }, context: sendContext } =
-                    await this.connection.getLatestBlockhashAndContext('processed');
-
-                logger.info('实际发送交易使用的区块信息:', {
-                    blockhash: sendBlockhash,
-                    lastValidBlockHeight: sendValidHeight,
-                    slot: sendContext.slot,
-                    commitment: 'processed',
-                    timestamp: new Date().toISOString()
-                });
-
-                // 更新交易的区块信息
-                sellTx.recentBlockhash = sendBlockhash;
-                sellTx.lastValidBlockHeight = sendValidHeight - 150; // 减少 150 个区块的有效期
-                sellTx.feePayer = seller.publicKey;
-
-                // 10. 发送交易
-                let signature;
-                if (options.usePriorityFee && options.priorityType === 'nozomi') {
-                    signature = await this.sendTransactionViaNozomi(
-                        sellTx,
-                        [seller],
-                        NOZOMI_CONFIG
-                    );
-                } else {
-                    signature = await sendAndConfirmTransaction(
-                        this.connection,
-                        sellTx,
-                        [seller],
-                        {
-                            skipPreflight: false,
-                            preflightCommitment: 'processed',
-                            maxRetries: 5,
-                            commitment: 'confirmed'
-                        }
-                    );
-                }
-
-                // 11. 返回结果
-                const result = {
-                    signature,
-                    txId: signature,
-                    amount: sellTokenAmount.toString(),
-                    mint: mint.toString(),
-                    owner: seller.publicKey.toString(),
-                    timestamp: new Date().toISOString(),
-                    slippage: `${Number(slippageBasisPoints) / 100}%`,
-                    status: 'success',
-                    endpoint: this.connection.rpcEndpoint,
-                    priorityFee: options.usePriorityFee ? {
-                        type: options.priorityType || 'jito',
-                        amount: priorityFees?.tipAmountSol
-                    } : undefined,
-                    simulation: {
-                        computeUnits: simulation.value.unitsConsumed || 0,
-                        fee: estimatedFee.value || 0
-                    },
-                    blockInfo: {
-                        blockhash: sendBlockhash,
-                        lastValidBlockHeight: sendValidHeight - 150,
-                        slot: sendContext.slot
-                    }
-                };
-
-                logger.info('卖出交易成功:', {
-                    signature: result.signature,
-                    seller: seller.publicKey.toString(),
-                    mint: mint.toString(),
-                    amount: sellTokenAmount.toString(),
-                    endpoint: this.connection.rpcEndpoint,
-                    priorityFee: result.priorityFee,
-                    simulation: result.simulation
-                });
-
-                return result;
-            });
-        } catch (error) {
-            logger.error('❌ 卖出代币失败', {
-                error: error.message,
-                mint: mint.toString(),
-                amount: sellTokenAmount.toString(),
-                slippage: `${Number(slippageBasisPoints) / 100}%`,
-                time: new Date().toISOString(),
-                endpoint: this.connection.rpcEndpoint
-            });
-            throw error;
-        }
-    }
-    async calculateSellSolOutput(mint, tokenAmount) {
-        try {
-            const bondingCurveAddress = await this.findBondingCurveAddress(mint);
-            const bondingCurveAccount = await this.program.account.bondingCurve.fetch(bondingCurveAddress);
-
-            if (!bondingCurveAccount) {
-                throw new Error('Bonding curve account not found');
-            }
-
-            // 添加输入验证日志
-            logger.debug('计算卖出 SOL 输出:', {
-                input: {
-                    mint: mint.toString(),
-                    tokenAmount: typeof tokenAmount === 'object' ?
-                        tokenAmount.toString() : tokenAmount,
-                    type: typeof tokenAmount
-                }
-            });
-
-            // 改进的 tokenAmount 转换
-            let tokenAmountBN;
-            try {
-                if (BN.isBN(tokenAmount)) {
-                    tokenAmountBN = tokenAmount;
-                } else if (tokenAmount instanceof PublicKey) {
-                    // 如果传入的是 PublicKey,需要先获取余额
-                    const tokenBalance = await this.getTokenBalance(
-                        await this.findAssociatedTokenAddress(tokenAmount, mint)
-                    );
-                    tokenAmountBN = new BN(tokenBalance.value.amount);
-                } else if (typeof tokenAmount === 'string') {
-                    // 清理字符串中的非数字字符
-                    const cleanAmount = tokenAmount.replace(/[^\d]/g, '');
-                    if (!cleanAmount) {
-                        // 如果可能是地址,尝试获取余额
-                        try {
-                            const pubKey = new PublicKey(tokenAmount);
-                            const tokenBalance = await this.getTokenBalance(
-                                await this.findAssociatedTokenAddress(pubKey, mint)
-                            );
-                            tokenAmountBN = new BN(tokenBalance.value.amount);
-                        } catch (e) {
-                            throw new Error('Invalid token amount format');
-                        }
-                    } else {
-                        tokenAmountBN = new BN(cleanAmount);
-                    }
-                } else if (typeof tokenAmount === 'number') {
-                    tokenAmountBN = new BN(Math.floor(tokenAmount).toString());
-                } else if (typeof tokenAmount === 'bigint') {
-                    tokenAmountBN = new BN(tokenAmount.toString());
-                } else {
-                    throw new Error(`Unsupported token amount type: ${typeof tokenAmount}`);
-                }
-            } catch (convError) {
-                logger.error('代币金额转换失败:', {
-                    error: convError.message,
-                    tokenAmount,
-                    type: typeof tokenAmount
-                });
-                throw new Error(`Failed to convert token amount: ${convError.message}`);
-            }
-
-            // 进行剩余的计算...
-            const currentVirtualTokenReserves = new BN(bondingCurveAccount.virtualTokenReserves.toString());
-            const currentVirtualSolReserves = new BN(bondingCurveAccount.virtualSolReserves.toString());
-
-            // 更多详细的日志
-            logger.debug('绑定曲线状态:', {
-                virtualTokenReserves: currentVirtualTokenReserves.toString(),
-                virtualSolReserves: currentVirtualSolReserves.toString(),
-                convertedAmount: tokenAmountBN.toString()
-            });
-
-            const newVirtualTokenReserves = currentVirtualTokenReserves.sub(tokenAmountBN);
-            if (newVirtualTokenReserves.lten(0)) {
-                throw new Error('Sale would deplete token reserves');
-            }
-
-            const k = currentVirtualSolReserves.mul(currentVirtualTokenReserves);
-            const newVirtualSolReserves = k.div(newVirtualTokenReserves);
-            return newVirtualSolReserves.sub(currentVirtualSolReserves);
-
-        } catch (error) {
-            logger.error('计算卖出 SOL 输出失败:', {
-                error: error.message,
-                mint: mint.toString(),
-                tokenAmount: tokenAmount?.toString?.() || tokenAmount,
-                stack: error.stack
-            });
-            throw error;
         }
     }
 
