@@ -1787,8 +1787,15 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 minSolOutput :
                 new BN(minSolOutput.toString());
 
-            // 6. Generate a new keypair for the associated bonding curve account
-            const associatedBondingCurveKeypair = Keypair.generate();
+            // 6. Derive the PDA for the associated bonding curve account
+            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('associated-bonding-curve'),
+                    sellerPubkey.toBuffer(),
+                    mintPubkey.toBuffer()
+                ],
+                this.program.programId
+            );
 
             // Create an array for instructions
             const instructions = [];
@@ -1800,30 +1807,29 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 })
             );
 
-            // Check if the account exists
-            const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveKeypair.publicKey);
+            // Check if the PDA exists
+            const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
 
             if (!accountInfo) {
                 logger.info('Creating associated bonding curve account:', {
-                    address: associatedBondingCurveKeypair.publicKey.toString(),
+                    address: associatedBondingCurveAddress.toString(),
                     user: sellerPubkey.toString(),
                     mint: mintPubkey.toString()
                 });
 
-                // Calculate space and rent
-                const space = 128; // Size for the associated bonding curve account
-                const rent = await this.connection.getMinimumBalanceForRentExemption(space);
+                // Add create associated bonding curve instruction
+                const createAssociatedBondingCurveIx = await this.program.methods
+                    .initializeAssociatedBondingCurve()
+                    .accounts({
+                        bondingCurve: bondingCurveAddress,
+                        associatedBondingCurve: associatedBondingCurveAddress,
+                        user: sellerPubkey,
+                        mint: mintPubkey,
+                        systemProgram: SystemProgram.programId
+                    })
+                    .instruction();
 
-                // Create account instruction
-                const createAccountIx = SystemProgram.createAccount({
-                    fromPubkey: sellerPubkey,
-                    newAccountPubkey: associatedBondingCurveKeypair.publicKey,
-                    lamports: rent,
-                    space,
-                    programId: this.program.programId
-                });
-
-                instructions.push(createAccountIx);
+                instructions.push(createAssociatedBondingCurveIx);
             }
 
             // Add sell instruction
@@ -1842,7 +1848,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     feeRecipient: globalAccount.feeRecipient,
                     mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: associatedBondingCurveKeypair.publicKey,
+                    associatedBondingCurve: associatedBondingCurveAddress,
                     associatedUser: tokenAccount,
                     user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
@@ -1855,18 +1861,15 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             instructions.push(sellInstruction);
 
             logger.debug('Instructions created successfully:', {
-                address: associatedBondingCurveKeypair.publicKey.toString(),
+                associatedBondingCurveAddress: associatedBondingCurveAddress.toString(),
                 instructionCount: instructions.length,
                 hasAccount: !!accountInfo,
                 seller: sellerPubkey.toString(),
                 mint: mintPubkey.toString()
             });
 
-            // Return instructions and the new keypair
-            return {
-                instructions,
-                signers: [associatedBondingCurveKeypair]
-            };
+            // Return instructions, no additional signers needed since we're using a PDA
+            return { instructions, signers: [] };
 
         } catch (error) {
             logger.error('Failed to create sell instructions:', {
