@@ -1747,7 +1747,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             // 3. 创建初始化指令
             const initInstruction = await this.program.methods
-                .initializeAssociatedAccount()
+                .initialize()
                 .accounts({
                     bondingCurve: bondingCurveAddress,
                     associatedBondingCurve: associatedBondingCurveAddress,
