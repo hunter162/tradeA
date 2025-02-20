@@ -1787,11 +1787,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 minSolOutput :
                 new BN(minSolOutput.toString());
 
-            // 6. Find associated bonding curve address
-            const associatedBondingCurveAddress = await this.findAssociatedBondingCurveAddress(
-                sellerPubkey,
-                mintPubkey
-            );
+            // 6. Generate a new keypair for the associated bonding curve account
+            const associatedBondingCurveKeypair = Keypair.generate();
 
             // Create an array for instructions
             const instructions = [];
@@ -1803,32 +1800,30 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 })
             );
 
-            // Add space allocation instruction for PDA if it doesn't exist
-            const associatedBondingCurveInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
+            // Check if the account exists
+            const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveKeypair.publicKey);
 
-            if (!associatedBondingCurveInfo) {
-                logger.info('Creating associated bonding curve PDA:', {
-                    address: associatedBondingCurveAddress.toString(),
+            if (!accountInfo) {
+                logger.info('Creating associated bonding curve account:', {
+                    address: associatedBondingCurveKeypair.publicKey.toString(),
                     user: sellerPubkey.toString(),
                     mint: mintPubkey.toString()
                 });
 
-                // Calculate rent exemption
+                // Calculate space and rent
                 const space = 128; // Size for the associated bonding curve account
                 const rent = await this.connection.getMinimumBalanceForRentExemption(space);
 
-                // Create PDA space allocation instruction
-                const createPdaIx = SystemProgram.createAccountWithSeed({
+                // Create account instruction
+                const createAccountIx = SystemProgram.createAccount({
                     fromPubkey: sellerPubkey,
-                    basePubkey: sellerPubkey,
-                    seed: 'associated-bonding-curve',
-                    newAccountPubkey: associatedBondingCurveAddress,
+                    newAccountPubkey: associatedBondingCurveKeypair.publicKey,
                     lamports: rent,
-                    space: space,
+                    space,
                     programId: this.program.programId
                 });
 
-                instructions.push(createPdaIx);
+                instructions.push(createAccountIx);
             }
 
             // Add sell instruction
@@ -1847,7 +1842,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     feeRecipient: globalAccount.feeRecipient,
                     mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: associatedBondingCurveAddress,
+                    associatedBondingCurve: associatedBondingCurveKeypair.publicKey,
                     associatedUser: tokenAccount,
                     user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
@@ -1860,13 +1855,18 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             instructions.push(sellInstruction);
 
             logger.debug('Instructions created successfully:', {
+                address: associatedBondingCurveKeypair.publicKey.toString(),
                 instructionCount: instructions.length,
-                hasAssociatedBondingCurve: !!associatedBondingCurveInfo,
+                hasAccount: !!accountInfo,
                 seller: sellerPubkey.toString(),
                 mint: mintPubkey.toString()
             });
 
-            return instructions;
+            // Return instructions and the new keypair
+            return {
+                instructions,
+                signers: [associatedBondingCurveKeypair]
+            };
 
         } catch (error) {
             logger.error('Failed to create sell instructions:', {
@@ -1979,8 +1979,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             // 3. Create transaction
             const transaction = new Transaction();
 
-            // 4. Get all necessary instructions
-            const instructions = await this.getSellInstructions(
+            // 4. Get instructions and signers
+            const { instructions, signers } = await this.getSellInstructions(
                 seller,
                 mint,
                 amount,
@@ -2002,7 +2002,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             logger.info('Simulating transaction...');
             const simulation = await this.connection.simulateTransaction(
                 transaction,
-                [seller],
+                [seller, ...signers],
                 {
                     sigVerify: false,
                     commitment: 'confirmed',
@@ -2026,7 +2026,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const signature = await sendAndConfirmTransaction(
                 this.connection,
                 transaction,
-                [seller],
+                [seller, ...signers],
                 {
                     skipPreflight: false,
                     preflightCommitment: 'confirmed',
