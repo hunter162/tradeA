@@ -2147,6 +2147,12 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     // customPumpSDK.js (sell 相关部分)
     // In CustomPumpSDK class
     async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
+        console.log('Seller:', seller);
+        console.log('Mint:', mint);
+        console.log('Sell Token Amount:', sellTokenAmount.toString()); // 如果是 BigInt 类型需要转换
+        console.log('Slippage Basis Points:', slippageBasisPoints.toString());
+        console.log('Priority Fees:', priorityFees);
+        console.log('Options:', JSON.stringify(options, null, 2)); // 格式化输出对象
         try {
             return await this.withRetry(async () => {
                 // 2. 获取卖出指令
