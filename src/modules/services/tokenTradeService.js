@@ -256,7 +256,7 @@ export class TokenTradeService {
 
             // 将滑点转换为 basis points
             const slippageBasisPoints = options.slippage ?
-                BigInt(Math.round(options.slippage * 100)) : 100n;
+                new BN(Math.round(options.slippage * 100)) : new BN(100);
 
             // 设置优先费用
             const priorityFees = options.usePriorityFee ? {
