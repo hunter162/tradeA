@@ -1793,17 +1793,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mintPubkey
             );
 
-            // 7. Create the sell instruction
-            logger.info('Building sell instruction:', {
-                seller: sellerPubkey.toString(),
-                mint: mintPubkey.toString(),
-                amount: amountBN.toString(),
-                minSolOutput: minSolOutputBN.toString(),
-                tokenAccount: tokenAccount.toString(),
-                slippage: slippageBN.toString(),
-                timestamp: new Date().toISOString()
-            });
-
             // Create an array for instructions
             const instructions = [];
 
@@ -1814,7 +1803,40 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 })
             );
 
+            // Check if associated bonding curve account exists
+            const associatedBondingCurveInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
+
+            if (!associatedBondingCurveInfo) {
+                logger.info('Creating associated bonding curve account:', {
+                    address: associatedBondingCurveAddress.toString(),
+                    user: sellerPubkey.toString(),
+                    mint: mintPubkey.toString()
+                });
+
+                // Add create_associated_bonding_curve instruction
+                const createAssociatedBondingCurveIx = await this.program.methods
+                    .create_associated_bonding_curve()
+                    .accounts({
+                        bondingCurve: bondingCurveAddress,
+                        associatedBondingCurve: associatedBondingCurveAddress,
+                        user: sellerPubkey,
+                        mint: mintPubkey,
+                        systemProgram: SystemProgram.programId
+                    })
+                    .instruction();
+
+                instructions.push(createAssociatedBondingCurveIx);
+            }
+
             // Add sell instruction
+            logger.info('Building sell instruction:', {
+                seller: sellerPubkey.toString(),
+                mint: mintPubkey.toString(),
+                amount: amountBN.toString(),
+                minSolOutput: minSolOutputBN.toString(),
+                tokenAccount: tokenAccount.toString()
+            });
+
             const sellInstruction = await this.program.methods
                 .sell(amountBN, minSolOutputBN)
                 .accounts({
@@ -1836,6 +1858,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             logger.debug('Instructions created successfully:', {
                 instructionCount: instructions.length,
+                hasAssociatedBondingCurve: !!associatedBondingCurveInfo,
                 seller: sellerPubkey.toString(),
                 mint: mintPubkey.toString()
             });
