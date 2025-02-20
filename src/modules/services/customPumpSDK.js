@@ -1793,49 +1793,28 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mintPubkey
             );
 
-            // 7. Build instructions array
+            // 7. Create the sell instruction
+            logger.info('Building sell instruction:', {
+                seller: sellerPubkey.toString(),
+                mint: mintPubkey.toString(),
+                amount: amountBN.toString(),
+                minSolOutput: minSolOutputBN.toString(),
+                tokenAccount: tokenAccount.toString(),
+                slippage: slippageBN.toString(),
+                timestamp: new Date().toISOString()
+            });
+
+            // Create an array for instructions
             const instructions = [];
 
-            // Add compute budget instruction for adequate compute units
+            // Add compute budget instruction
             instructions.push(
                 ComputeBudgetProgram.setComputeUnitLimit({
                     units: 400000
                 })
             );
 
-            // Check if associated bonding curve account exists
-            const associatedBondingCurveInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
-
-            if (!associatedBondingCurveInfo) {
-                // Create associated bonding curve account
-                const space = 128; // Adjust size based on your account structure
-                const rent = await this.connection.getMinimumBalanceForRentExemption(space);
-
-                const createAccountIx = SystemProgram.createAccount({
-                    fromPubkey: sellerPubkey,
-                    newAccountPubkey: associatedBondingCurveAddress,
-                    lamports: rent,
-                    space: space,
-                    programId: this.program.programId
-                });
-
-                instructions.push(createAccountIx);
-
-                // Initialize associated bonding curve account
-                const initAssociatedBondingCurveIx = await this.program.methods
-                    .initializeAssociatedBondingCurve()
-                    .accounts({
-                        bondingCurve: bondingCurveAddress,
-                        associatedBondingCurve: associatedBondingCurveAddress,
-                        user: sellerPubkey,
-                        systemProgram: SystemProgram.programId
-                    })
-                    .instruction();
-
-                instructions.push(initAssociatedBondingCurveIx);
-            }
-
-            // 8. Add sell instruction
+            // Add sell instruction
             const sellInstruction = await this.program.methods
                 .sell(amountBN, minSolOutputBN)
                 .accounts({
@@ -1855,13 +1834,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             instructions.push(sellInstruction);
 
-            logger.info('Sell instructions created:', {
+            logger.debug('Instructions created successfully:', {
                 instructionCount: instructions.length,
-                hasAssociatedBondingCurve: !!associatedBondingCurveInfo,
                 seller: sellerPubkey.toString(),
-                mint: mintPubkey.toString(),
-                amount: amountBN.toString(),
-                minSolOutput: minSolOutputBN.toString()
+                mint: mintPubkey.toString()
             });
 
             return instructions;
