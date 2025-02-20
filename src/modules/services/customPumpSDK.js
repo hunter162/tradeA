@@ -1747,6 +1747,11 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Provider initialization failed');
             }
 
+            // Log available program methods from IDL
+            logger.info('Available IDL methods:', {
+                methods: this.program.idl.instructions.map(ix => ix.name)
+            });
+
             // 3. Convert parameters to correct types
             const sellerPubkey = this.ensurePublicKey(seller);
             const mintPubkey = this.ensurePublicKey(mint);
@@ -1811,17 +1816,19 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
 
             if (!accountInfo) {
-                logger.info('Creating associated bonding curve account:', {
+                // Create space for PDA using system program
+                logger.info('Creating associated bonding curve PDA:', {
                     address: associatedBondingCurveAddress.toString(),
                     user: sellerPubkey.toString(),
                     mint: mintPubkey.toString()
                 });
 
-                // Add create associated bonding curve instruction
-                const createAssociatedBondingCurveIx = await this.program.methods
-                    .initializeAssociatedBondingCurve()
+                const rent = await this.connection.getMinimumBalanceForRentExemption(128);
+
+                // Create instruction to allocate space for the PDA
+                const createAccountIx = await this.program.methods
+                    .initialize_associated_bonding_curve()  // try snake_case naming
                     .accounts({
-                        bondingCurve: bondingCurveAddress,
                         associatedBondingCurve: associatedBondingCurveAddress,
                         user: sellerPubkey,
                         mint: mintPubkey,
@@ -1829,7 +1836,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     })
                     .instruction();
 
-                instructions.push(createAssociatedBondingCurveIx);
+                instructions.push(createAccountIx);
             }
 
             // Add sell instruction
