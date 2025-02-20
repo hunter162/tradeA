@@ -1847,7 +1847,54 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;
         }
     }
+    async calculateWithSlippageSell(solOutput, slippageOptions) {
+        try {
+            // Extract slippage basis points from options
+            let basisPoints;
+            if (typeof slippageOptions === 'object') {
+                basisPoints = slippageOptions.slippageBasisPoints || 100;
+            } else {
+                basisPoints = slippageOptions || 100;
+            }
 
+            // Ensure solOutput is BigInt
+            const amount = typeof solOutput === 'bigint' ?
+                solOutput :
+                BigInt(solOutput.toString());
+
+            // Ensure basisPoints is BigInt
+            const basisPointsBN = typeof basisPoints === 'bigint' ?
+                basisPoints :
+                BigInt(basisPoints.toString());
+
+            // Calculate with BigInt
+            // For sells, we subtract the slippage to get the minimum acceptable output
+            const TEN_THOUSAND = BigInt(10000);
+            const slippageAmount = (amount * basisPointsBN) / TEN_THOUSAND;
+            const finalAmount = amount - slippageAmount;  // Subtract for sell operations
+
+            logger.debug('卖出滑点计算:', {
+                originalAmount: amount.toString(),
+                slippageBasisPoints: basisPointsBN.toString(),
+                slippageAmount: slippageAmount.toString(),
+                minimumOutput: finalAmount.toString()
+            });
+
+            // Ensure the final amount is not negative
+            if (finalAmount <= BigInt(0)) {
+                throw new Error('Slippage calculation resulted in zero or negative amount');
+            }
+
+            return finalAmount;
+        } catch (error) {
+            logger.error('计算卖出滑点失败:', {
+                solOutput: typeof solOutput === 'bigint' ? solOutput.toString() : solOutput,
+                error: error.message,
+                slippageOptions: JSON.stringify(slippageOptions)
+            });
+            throw new Error(`Failed to calculate sell slippage: ${error.message}`);
+        }
+    }
 
 
 // Then in the sell method:
@@ -2003,7 +2050,49 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;
         }
     }
+    async calculateSellSolOutput(mint, tokenAmount) {
+        try {
+            // Get the bonding curve account
+            const bondingCurveAddress = await this.findBondingCurveAddress(mint);
+            const bondingCurveAccount = await this.program.account.bondingCurve.fetch(bondingCurveAddress);
 
+            if (!bondingCurveAccount) {
+                throw new Error('Bonding curve account not found');
+            }
+
+            // Convert tokenAmount to BN if it isn't already
+            const tokenAmountBN = BN.isBN(tokenAmount) ? tokenAmount : new BN(tokenAmount.toString());
+
+            // Calculate virtual SOL reserves after sale
+            const newVirtualTokenReserves = new BN(bondingCurveAccount.virtualTokenReserves.toString())
+                .sub(tokenAmountBN);
+
+            const virtualSolReservesBN = new BN(bondingCurveAccount.virtualSolReserves.toString());
+            const k = virtualSolReservesBN.mul(new BN(bondingCurveAccount.virtualTokenReserves.toString()));
+
+            // Calculate new SOL reserves using constant product formula
+            const newVirtualSolReserves = k.div(newVirtualTokenReserves);
+
+            // Calculate SOL output
+            const solOutput = newVirtualSolReserves.sub(virtualSolReservesBN);
+
+            logger.debug('Sell output calculation:', {
+                tokenAmount: tokenAmountBN.toString(),
+                currentVirtualTokenReserves: bondingCurveAccount.virtualTokenReserves.toString(),
+                currentVirtualSolReserves: bondingCurveAccount.virtualSolReserves.toString(),
+                calculatedSolOutput: solOutput.toString()
+            });
+
+            return solOutput;
+        } catch (error) {
+            logger.error('Failed to calculate sell output:', {
+                error: error.message,
+                mint: mint.toString(),
+                tokenAmount: tokenAmount.toString()
+            });
+            throw error;
+        }
+    }
 
 
 // 辅助方法：检查账户是否存在
