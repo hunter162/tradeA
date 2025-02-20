@@ -1764,23 +1764,15 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mintPubkey
             );
 
-            // 修改: 正确获取关联绑定曲线地址
-            const associatedBondingCurveAddress = await this.findAssociatedBondingCurveAddress(
-                sellerPubkey,
-                mintPubkey
-            );
+            // 临时方案：使用代币账户作为绑定曲线账户
+            // 这不是最理想的方式，但可能作为临时解决方案
+            const associatedBondingCurveAddress = associatedTokenAccount;
 
             // 6. 检查绑定曲线状态
             try {
                 const bondingCurveAccount = await this.program.account.bondingCurve.fetch(bondingCurveAddress);
-                if (bondingCurveAccount.complete) {
-                    logger.warn('注意: 该绑定曲线已完成 (complete=true)', {
-                        bondingCurve: bondingCurveAddress.toString(),
-                        mint: mintPubkey.toString()
-                    });
-                }
 
-                // 记录更详细的绑定曲线信息
+                // 记录详细的绑定曲线信息
                 logger.info('绑定曲线账户状态:', {
                     virtualTokenReserves: bondingCurveAccount.virtualTokenReserves.toString(),
                     virtualSolReserves: bondingCurveAccount.virtualSolReserves.toString(),
@@ -1788,6 +1780,13 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     realSolReserves: bondingCurveAccount.realSolReserves.toString(),
                     complete: bondingCurveAccount.complete
                 });
+
+                if (bondingCurveAccount.complete) {
+                    logger.warn('警告: 该绑定曲线已完成 (complete=true)', {
+                        bondingCurve: bondingCurveAddress.toString(),
+                        mint: mintPubkey.toString()
+                    });
+                }
             } catch (error) {
                 logger.warn('获取绑定曲线状态失败:', {
                     error: error.message,
@@ -1799,7 +1798,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const calculatedSolOutput = await this.calculateSellSolOutput(mintPubkey, tokenAmount);
             const minSolOutput = await this.calculateWithSlippageSell(
                 calculatedSolOutput,
-                slippageBasisPoints || 2000n  // 默认使用20%滑点
+                slippageBasisPoints || 100n
             );
 
             // 添加详细的日志输出
@@ -1823,14 +1822,14 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             // 8. Build instructions array
             const instructions = [];
 
-            // Add compute budget instruction with increased compute units
+            // Add compute budget instruction
             instructions.push(
                 ComputeBudgetProgram.setComputeUnitLimit({
-                    units: 600000  // 增加计算单元上限
+                    units: 600000
                 })
             );
 
-            // 9. Create sell instruction with correct account assignments
+            // 9. Create sell instruction
             const sellInstruction = await this.program.methods
                 .sell(
                     new BN(tokenAmount.toString()),
@@ -1841,7 +1840,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     feeRecipient: globalAccount.feeRecipient,
                     mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: associatedBondingCurveAddress, // 使用正确的关联绑定曲线地址
+                    associatedBondingCurve: associatedTokenAccount, // 使用代币账户作为临时解决方案
                     associatedUser: associatedTokenAccount,
                     user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
@@ -1854,7 +1853,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             instructions.push(sellInstruction);
 
-            // 记录指令详情
+            // 在创建指令之后添加日志
             logger.info('卖出指令详情:', {
                 instruction: {
                     programId: this.program.programId.toString(),
@@ -1864,7 +1863,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                         { name: 'feeRecipient', pubkey: globalAccount.feeRecipient.toString() },
                         { name: 'mint', pubkey: mintPubkey.toString() },
                         { name: 'bondingCurve', pubkey: bondingCurveAddress.toString() },
-                        { name: 'associatedBondingCurve', pubkey: associatedBondingCurveAddress.toString() },
+                        { name: 'associatedBondingCurve', pubkey: associatedTokenAccount.toString() },
                         { name: 'associatedUser', pubkey: associatedTokenAccount.toString() },
                         { name: 'user', pubkey: sellerPubkey.toString() },
                         { name: 'systemProgram', pubkey: SystemProgram.programId.toString() },
