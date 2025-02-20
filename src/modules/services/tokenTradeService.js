@@ -276,7 +276,7 @@ export class TokenTradeService {
             const result = await sdk.sell(
                 keypair,
                 new PublicKey(cleanTokenAddress),
-                sellAmount1,
+                sellAmount,
                 slippageBasisPoints,
                 priorityFees,
                 sellOptions

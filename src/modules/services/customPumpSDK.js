@@ -2153,7 +2153,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 let sellTx = await super.getSellInstructionsByTokenAmount(
                     seller.publicKey,
                     mint,
-                    sellTokenAmount,
+                    BigInt(sellTokenAmount.toString()),
                     slippageBasisPoints,
                     'confirmed'
                 );
