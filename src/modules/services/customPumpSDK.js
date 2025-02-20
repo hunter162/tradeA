@@ -1764,9 +1764,23 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mintPubkey
             );
 
-            // 临时方案：使用代币账户作为绑定曲线账户
-            // 这不是最理想的方式，但可能作为临时解决方案
-            const associatedBondingCurveAddress = associatedTokenAccount;
+            // 正确派生关联绑定曲线地址
+            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('associated-bonding-curve'),
+                    sellerPubkey.toBuffer(),
+                    mintPubkey.toBuffer()
+                ],
+                this.program.programId
+            );
+
+            // 记录验证的地址
+            logger.info('验证关联绑定曲线地址:', {
+                derived: associatedBondingCurveAddress.toString(),
+                expected: '5XpPcaFfm3zm3nac2T3M5AnQToJ65KfX6vDqthV8Xn2R',  // 从错误日志中提取的期望地址
+                mintPubkey: mintPubkey.toString(),
+                sellerPubkey: sellerPubkey.toString()
+            });
 
             // 6. 检查绑定曲线状态
             try {
@@ -1840,7 +1854,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     feeRecipient: globalAccount.feeRecipient,
                     mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: associatedTokenAccount, // 使用代币账户作为临时解决方案
+                    associatedBondingCurve: associatedBondingCurveAddress, // 使用正确派生的地址
                     associatedUser: associatedTokenAccount,
                     user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
@@ -1863,7 +1877,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                         { name: 'feeRecipient', pubkey: globalAccount.feeRecipient.toString() },
                         { name: 'mint', pubkey: mintPubkey.toString() },
                         { name: 'bondingCurve', pubkey: bondingCurveAddress.toString() },
-                        { name: 'associatedBondingCurve', pubkey: associatedTokenAccount.toString() },
+                        { name: 'associatedBondingCurve', pubkey: associatedBondingCurveAddress.toString() },
                         { name: 'associatedUser', pubkey: associatedTokenAccount.toString() },
                         { name: 'user', pubkey: sellerPubkey.toString() },
                         { name: 'systemProgram', pubkey: SystemProgram.programId.toString() },
