@@ -2,7 +2,7 @@ import { Keypair, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddress } from '@solana/spl-token';
 import { logger } from '../utils/index.js';
 import db from '../db/index.js';
-import { EncryptionManager } from '../utils/encryption.js';
+import { EncryptionManager } from '../utils/index.js';
 import { ENCRYPTION_CONFIG } from '../../config/encryption.js';
 import bs58 from 'bs58';
 import { CustomError } from '../utils/errors.js';
@@ -1803,42 +1803,28 @@ export class WalletService {
     // 获取代币余额
     async getTokenBalance(groupType, accountNumber, mintAddress) {
         try {
-            // 1. 获取钱包
+            // 1. 清理 mintAddress 字符串
+            const cleanMintAddress = mintAddress.trim();
+
+            // 2. 获取钱包
             const wallet = await this.getWallet(groupType, accountNumber);
             if (!wallet) {
                 throw new Error(`Wallet not found: ${groupType}-${accountNumber}`);
             }
 
-            // 2. 转换为 PublicKey 对象
+            // 3. 转换为 PublicKey 对象
             const ownerPublicKey = new PublicKey(wallet.publicKey);
-            const mintPublicKey = new PublicKey(mintAddress);
+            const mintPublicKey = new PublicKey(cleanMintAddress);
 
-            // 3. 尝试从缓存获取余额
-            let balance;
-            if (this.redis?.client?.isReady) {
-                try {
-                    const cacheKey = `token:balance:${wallet.publicKey}:${mintAddress}`;
-                    const cachedBalance = await this.redis.get(cacheKey);
-                    if (cachedBalance) {
-                        logger.info('使用缓存的代币余额:', {
-                            cacheKey,
-                            balance: cachedBalance,
-                            source: 'cache'
-                        });
-                        return BigInt(cachedBalance);
-                    }
-                } catch (cacheError) {
-                    // 缓存错误不影响主流程
-                    logger.debug('缓存未命中或错误，将从链上获取:', {
-                        error: cacheError.message,
-                        owner: wallet.publicKey,
-                        mint: mintAddress
-                    });
-                }
-            }
+            logger.info('开始获取代币余额:', {
+                groupType,
+                accountNumber,
+                mintAddress: cleanMintAddress,
+                publicKey: wallet.publicKey
+            });
 
             // 4. 获取链上余额
-            balance = await this.solanaService.getTokenBalance(
+            const balance = await this.solanaService.getTokenBalance(
                 ownerPublicKey,
                 mintPublicKey
             );
@@ -1846,27 +1832,10 @@ export class WalletService {
             logger.info('获取代币余额成功:', {
                 groupType,
                 accountNumber,
-                mintAddress,
+                mintAddress: cleanMintAddress,
                 publicKey: wallet.publicKey,
-                balance: balance.toString(),
-                source: 'chain'
+                balance: balance.toString()
             });
-
-            // 5. 如果 Redis 可用，尝试更新缓存
-            if (this.redis?.client?.isReady) {
-                try {
-                    const cacheKey = `token:balance:${wallet.publicKey}:${mintAddress}`;
-                    await this.redis.set(cacheKey, balance.toString(), { EX: 60 });
-                    logger.debug('余额已缓存:', { cacheKey, balance: balance.toString() });
-                } catch (cacheError) {
-                    // 缓存错误不影响主流程
-                    logger.debug('缓存更新失败:', {
-                        error: cacheError.message,
-                        owner: wallet.publicKey,
-                        mint: mintAddress
-                    });
-                }
-            }
 
             return balance;
         } catch (error) {
