@@ -1852,6 +1852,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
 // Then in the sell method:
     // customPumpSDK.js (sell 相关部分)
+    // customPumpSDK.js
     async sell(seller, mint, amount, options = {}) {
         try {
             // 1. 基础验证
@@ -1865,11 +1866,17 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Invalid amount');
             }
 
+            // 将 BigInt 转换为字符串用于日志记录
+            const amountStr = amount.toString();
+
             logger.info('开始卖出操作:', {
                 seller: seller.publicKey.toString(),
                 mint: mint.toString(),
-                amount: amount.toString(),
-                options: JSON.stringify(options)
+                amount: amountStr,
+                options: {
+                    ...options,
+                    slippageBasisPoints: options.slippageBasisPoints?.toString()
+                }
             });
 
             // 2. 获取代币账户
@@ -1886,18 +1893,17 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
             const availableAmount = BigInt(tokenBalance.value.amount);
-            const sellAmount = BigInt(amount);
 
             logger.info('代币余额检查:', {
                 account: tokenAccount.toString(),
                 available: availableAmount.toString(),
-                selling: sellAmount.toString(),
+                selling: amountStr,
                 decimals: tokenBalance.value.decimals
             });
 
-            if (sellAmount > availableAmount) {
+            if (amount > availableAmount) {
                 throw new Error(
-                    `Insufficient token balance. Available: ${availableAmount}, Trying to sell: ${sellAmount}`
+                    `Insufficient token balance. Available: ${availableAmount.toString()}, Trying to sell: ${amountStr}`
                 );
             }
 
@@ -1908,7 +1914,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const sellInstruction = await this.getSellInstructions(
                 seller,
                 mint,
-                sellAmount,
+                amount,
                 options.slippageBasisPoints || 100n
             );
 
@@ -1974,13 +1980,13 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             logger.info('卖出交易成功:', {
                 signature,
                 seller: seller.publicKey.toString(),
-                amount: sellAmount.toString()
+                amount: amountStr
             });
 
             return {
                 success: true,
                 signature,
-                amount: sellAmount.toString(),
+                amount: amountStr,
                 mint: mint.toString(),
                 seller: seller.publicKey.toString(),
                 timestamp: new Date().toISOString()
