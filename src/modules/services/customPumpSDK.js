@@ -1734,17 +1734,11 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
         try {
             // 1. Input validation
-            if (!seller) {
-                throw new Error('Seller is required');
-            }
-            if (!mint) {
-                throw new Error('Mint is required');
-            }
-            if (!tokenAmount) {
-                throw new Error('Token amount is required');
-            }
+            if (!seller) throw new Error('Seller is required');
+            if (!mint) throw new Error('Mint is required');
+            if (!tokenAmount) throw new Error('Token amount is required');
 
-            // 2. Initialize provider
+            // 2. Initialize provider if needed
             if (!this.program) {
                 await this.initializeProvider(seller);
             }
@@ -1753,15 +1747,15 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Provider initialization failed');
             }
 
-            // 3. Convert and validate parameters
+            // 3. Convert parameters to correct types
             const sellerPubkey = this.ensurePublicKey(seller);
             const mintPubkey = this.ensurePublicKey(mint);
 
-            // 4. Ensure amounts are BN
+            // Convert token amount to BN
             const amountBN = new BN(tokenAmount.toString());
             const slippageBN = new BN(slippageBasisPoints?.toString() || '100');
 
-            // 5. Get necessary accounts
+            // 4. Get accounts
             const globalAccount = await this.getGlobalAccount();
             if (!globalAccount?.address) {
                 throw new Error('Global account not found');
@@ -1777,38 +1771,41 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mintPubkey
             );
 
-            // 6. Get fee recipient
-            const feeRecipient = globalAccount.feeRecipient;
-            if (!feeRecipient) {
-                throw new Error('Fee recipient not found in global account');
-            }
+            // 5. Calculate minimum SOL output
+            const calculatedSolOutput = await this.calculateSellSolOutput(mintPubkey, amountBN);
 
-            // 7. Calculate minimum SOL output with slippage
-            const calculatedSolOutput = await this.calculateSellSolOutput(
-                mintPubkey,
-                amountBN
-            );
+            // Ensure calculatedSolOutput is a BN
+            const solOutputBN = BN.isBN(calculatedSolOutput) ?
+                calculatedSolOutput :
+                new BN(calculatedSolOutput.toString());
 
-            const minSolOutput = this.calculateWithSlippageSell(
-                calculatedSolOutput,
+            // Calculate minimum output with slippage
+            const minSolOutput = await this.calculateWithSlippageSell(
+                solOutputBN,
                 slippageBN
             );
 
-            // 8. Build instruction
+            // Convert the result to BN if it's not already
+            const minSolOutputBN = BN.isBN(minSolOutput) ?
+                minSolOutput :
+                new BN(minSolOutput.toString());
+
             logger.info('Building sell instruction:', {
                 seller: sellerPubkey.toString(),
                 mint: mintPubkey.toString(),
                 amount: amountBN.toString(),
-                slippage: slippageBN.toString(),
+                minSolOutput: minSolOutputBN.toString(),
                 tokenAccount: tokenAccount.toString(),
-                minSolOutput: minSolOutput.toString()
+                slippage: slippageBN.toString(),
+                timestamp: new Date().toISOString()
             });
 
+            // 6. Build instruction
             const instruction = await this.program.methods
-                .sell(amountBN, minSolOutput)
+                .sell(amountBN, minSolOutputBN)
                 .accounts({
                     global: globalAccount.address,
-                    feeRecipient: feeRecipient,
+                    feeRecipient: globalAccount.feeRecipient,
                     mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
                     associatedBondingCurve: await this.findAssociatedBondingCurveAddress(
@@ -1824,16 +1821,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 })
                 .instruction();
 
-            // 9. Validate returned instruction
+            // 7. Validate instruction
             if (!instruction || !instruction.data) {
                 throw new Error('Invalid instruction generated');
             }
-
-            logger.debug('Sell instruction created successfully:', {
-                programId: instruction.programId.toString(),
-                dataSize: instruction.data.length,
-                keys: instruction.keys.length
-            });
 
             return instruction;
 
