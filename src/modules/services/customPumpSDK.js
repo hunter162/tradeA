@@ -1726,16 +1726,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     // Add to CustomPumpSDK class:
     async initializeAssociatedBondingCurve(user, mint) {
         try {
-            logger.info('Initializing associated bonding curve', {
+            logger.info('初始化关联绑定曲线账户', {
                 user: user.publicKey.toString(),
                 mint: mint.toString()
             });
 
-            // Get required accounts
+            // 获取需要的账户地址
             const bondingCurveAddress = await this.findBondingCurveAddress(mint);
             const globalAccount = await this.getGlobalAccount();
 
-            // Find associated bonding curve address
+            // 生成关联绑定曲线地址
             const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
                 [
                     Buffer.from('associated-bonding-curve'),
@@ -1745,30 +1745,29 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 this.program.programId
             );
 
-            // Create generic 'initialize' instruction for the associated bonding curve
+            // 创建初始化指令，注意参数要匹配程序的要求
             const initInstruction = await this.program.methods
-                .initialize()  // Use the generic initialize method
+                .initializeAssociatedBondingCurve()  // 使用正确的初始化方法名
                 .accounts({
-                    global: globalAccount.address,
                     bondingCurve: bondingCurveAddress,
                     associatedBondingCurve: associatedBondingCurveAddress,
                     user: user.publicKey,
-                    systemProgram: SystemProgram.programId,
-                    eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
-                    program: this.program.programId
+                    payer: user.publicKey,  // 添加支付账户
+                    systemProgram: SystemProgram.programId
                 })
                 .instruction();
 
-            // Create and send transaction
+            // 创建和发送交易
             const tx = new Transaction();
-            tx.add(initInstruction);
 
-            // Add compute budget instruction
+            // 添加计算预算指令
             tx.add(
                 ComputeBudgetProgram.setComputeUnitLimit({
                     units: 400000
                 })
             );
+
+            tx.add(initInstruction);
 
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
@@ -1789,7 +1788,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             );
 
-            logger.info('Associated bonding curve initialized', {
+            logger.info('关联绑定曲线初始化成功', {
                 signature,
                 address: associatedBondingCurveAddress.toString()
             });
@@ -1800,7 +1799,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 address: associatedBondingCurveAddress.toString()
             };
         } catch (error) {
-            logger.error('Failed to initialize associated bonding curve', {
+            logger.error('初始化关联绑定曲线失败', {
                 error: error.message,
                 user: user?.publicKey?.toString(),
                 mint: mint?.toString(),
