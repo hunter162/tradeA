@@ -1787,14 +1787,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 minSolOutput :
                 new BN(minSolOutput.toString());
 
-            // 6. Find associated bonding curve address and bump
-            const [associatedBondingCurveAddress, bump] = await PublicKey.findProgramAddress(
-                [
-                    Buffer.from('associated-bonding-curve'),
-                    sellerPubkey.toBuffer(),
-                    mintPubkey.toBuffer()
-                ],
-                this.program.programId
+            // 6. Find associated bonding curve address
+            const associatedBondingCurveAddress = await this.findAssociatedBondingCurveAddress(
+                sellerPubkey,
+                mintPubkey
             );
 
             // Create an array for instructions
@@ -1807,30 +1803,32 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 })
             );
 
-            // Check if associated bonding curve account exists
+            // Add space allocation instruction for PDA if it doesn't exist
             const associatedBondingCurveInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
 
             if (!associatedBondingCurveInfo) {
-                logger.info('Creating associated bonding curve account:', {
+                logger.info('Creating associated bonding curve PDA:', {
                     address: associatedBondingCurveAddress.toString(),
                     user: sellerPubkey.toString(),
                     mint: mintPubkey.toString()
                 });
 
-                // Calculate space needed for the account
+                // Calculate rent exemption
                 const space = 128; // Size for the associated bonding curve account
                 const rent = await this.connection.getMinimumBalanceForRentExemption(space);
 
-                // Create account instruction
-                const createAccountIx = SystemProgram.createAccount({
+                // Create PDA space allocation instruction
+                const createPdaIx = SystemProgram.createAccountWithSeed({
                     fromPubkey: sellerPubkey,
+                    basePubkey: sellerPubkey,
+                    seed: 'associated-bonding-curve',
                     newAccountPubkey: associatedBondingCurveAddress,
                     lamports: rent,
                     space: space,
                     programId: this.program.programId
                 });
 
-                instructions.push(createAccountIx);
+                instructions.push(createPdaIx);
             }
 
             // Add sell instruction
