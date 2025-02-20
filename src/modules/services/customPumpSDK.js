@@ -2203,10 +2203,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
         }
     }
 
-
-// Then in the sell method:
     // customPumpSDK.js (sell 相关部分)
-    // customPumpSDK.js
     async sell(seller, mint, amount, options = {}) {
         try {
             // 1. Basic validation
@@ -2233,17 +2230,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             });
 
-            // 2. Ensure associated bonding curve exists
-            const associatedBondingCurveExists = await this.ensureAssociatedBondingCurveExists(
-                seller,
-                mintPubkey
-            );
-
-            if (!associatedBondingCurveExists) {
-                throw new Error('Could not initialize associated bonding curve');
-            }
-
-            // 3. Check token balance
+            // 2. Check token balance
             const tokenAccount = await this.findAssociatedTokenAddress(
                 seller.publicKey,
                 mintPubkey
@@ -2258,9 +2245,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 );
             }
 
-            // 修改: 如果是卖出全部余额，则卖出95%以确保成功
+            // 3. 如果是卖出全部余额，则卖出95%以确保成功
             if (amountBN.eq(availableAmount) || options.percentage === 100) {
-                // 使用 BigInt 操作，避免 Math.floor 转换错误
                 const tokenBalanceBigInt = BigInt(tokenBalance.value.amount);
                 const adjustedAmountBigInt = (tokenBalanceBigInt * 95n) / 100n;
                 const adjustedAmount = new BN(adjustedAmountBigInt.toString());
@@ -2275,20 +2261,27 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             // 4. Create transaction
             const transaction = new Transaction();
 
-            // 修改: 增加优先费用指令
+            // 5. 增加优先费用指令
             if (options.usePriorityFee || options.priorityFeeSol) {
                 const priorityFeeAmount = options.priorityFeeSol ?
-                    Math.floor(Number(options.priorityFeeSol) * 1000000) : 20000;
+                    Math.floor(Number(options.priorityFeeSol) * 1000000) : 100000;
 
                 transaction.add(
                     ComputeBudgetProgram.setComputeUnitPrice({
                         microLamports: priorityFeeAmount
                     })
                 );
+
+                transaction.add(
+                    ComputeBudgetProgram.setComputeUnitLimit({
+                        units: 400000
+                    })
+                );
+
                 logger.info('添加优先费用:', { microLamports: priorityFeeAmount });
             }
 
-            // 5. Get instructions with increased slippage
+            // 6. Get instructions with increased slippage
             const slippageBP = options.slippageBasisPoints || 2000n; // 默认20%滑点
             const { instructions, signers } = await this.getSellInstructions(
                 seller.publicKey,
@@ -2297,10 +2290,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 slippageBP
             );
 
-            // 6. Add all instructions to transaction
+            // 7. Add all instructions to transaction
             instructions.forEach(instruction => transaction.add(instruction));
 
-            // 7. Get latest blockhash
+            // 8. Get latest blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -2308,7 +2301,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 8. Simulate transaction with detailed logs
+            // 9. Simulate transaction
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller, ...signers],
@@ -2335,21 +2328,42 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             logger.info('交易模拟成功:', {
                 unitsConsumed: simulation.value.unitsConsumed,
-                logs: (simulation.value.logs || []).slice(0, 3) // 记录前几行日志
+                logs: (simulation.value.logs || []).slice(0, 3)
             });
 
-            // 9. Send and confirm transaction
-            const signature = await sendAndConfirmTransaction(
-                this.connection,
-                transaction,
-                [seller, ...signers],
-                {
-                    skipPreflight: false,
-                    preflightCommitment: 'confirmed',
-                    commitment: 'confirmed',
-                    maxRetries: 5
+            // 10. Send and confirm transaction with retries
+            let signature;
+            let retryCount = 0;
+            const maxRetries = 5;
+
+            while (retryCount < maxRetries) {
+                try {
+                    signature = await sendAndConfirmTransaction(
+                        this.connection,
+                        transaction,
+                        [seller, ...signers],
+                        {
+                            skipPreflight: false,
+                            preflightCommitment: 'confirmed',
+                            commitment: 'confirmed',
+                            maxRetries: 3
+                        }
+                    );
+                    break;  // 如果交易成功，跳出循环
+                } catch (sendError) {
+                    retryCount++;
+                    logger.warn(`Transaction retry ${retryCount}/${maxRetries}:`, {
+                        error: sendError.message
+                    });
+
+                    if (retryCount === maxRetries) {
+                        throw sendError;  // 如果达到最大重试次数，抛出错误
+                    }
+
+                    // 等待后重试，时间逐渐增加
+                    await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
                 }
-            );
+            }
 
             return {
                 success: true,
