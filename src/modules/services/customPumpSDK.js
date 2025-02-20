@@ -2196,6 +2196,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     }
 
     // customPumpSDK.js (sell 相关部分)
+    // In CustomPumpSDK class
     async sell(seller, mint, amount, options = {}) {
         try {
             // 1. Basic validation
@@ -2222,74 +2223,34 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             });
 
-            // 2. 获取全局账户
-            const globalAccount = await this.getGlobalAccount();
-            if (!globalAccount) {
-                throw new Error('Failed to get global account');
-            }
-
-            const globalAccountInfo = await this.program.account.global.fetch(globalAccount);
-            if (!globalAccountInfo) {
-                throw new Error('Failed to fetch global account info');
-            }
-
-            const { feeRecipient } = globalAccountInfo;
-
-            // 3. 获取代币账户
-            const tokenAccount = await this.findAssociatedTokenAddress(
-                seller.publicKey,
-                mintPubkey
-            );
-
-            const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
-            const availableAmount = new BN(tokenBalance.value.amount);
-
-            if (amountBN.gt(availableAmount)) {
-                throw new Error(
-                    `Insufficient token balance. Available: ${availableAmount.toString()}, Trying to sell: ${amountBN.toString()}`
-                );
-            }
-
-            // 4. 如果是卖出全部余额，则卖出95%
-            if (amountBN.eq(availableAmount) || options.percentage === 100) {
-                const tokenBalanceBigInt = BigInt(tokenBalance.value.amount);
-                const adjustedAmountBigInt = (tokenBalanceBigInt * 95n) / 100n;
-                amountBN = new BN(adjustedAmountBigInt.toString());
-            }
-
-            // 5. 构建指令
+            // 4. Create transaction
             const transaction = new Transaction();
 
-            // 6. 添加计算预算
-            transaction.add(
-                ComputeBudgetProgram.setComputeUnitLimit({
-                    units: 600000
-                })
-            );
+            // 5. 增加优先费用指令
+            if (options.usePriorityFee || options.priorityFeeSol) {
+                const priorityFeeAmount = options.priorityFeeSol ?
+                    Math.floor(Number(options.priorityFeeSol) * 1000000) : 100000;
 
-            // 7. 添加优先级费用
-            const priorityFeeAmount = options.priorityFeeSol ?
-                Math.floor(Number(options.priorityFeeSol) * 1000000) : 100000;
+                transaction.add(
+                    ComputeBudgetProgram.setComputeUnitPrice({
+                        microLamports: priorityFeeAmount
+                    })
+                );
+                logger.info('添加优先费用:', { microLamports: priorityFeeAmount });
+            }
 
-            transaction.add(
-                ComputeBudgetProgram.setComputeUnitPrice({
-                    microLamports: priorityFeeAmount
-                })
-            );
-
-            // 8. 创建卖出指令
-            const slippageBP = options.slippageBasisPoints || 100n;
-            const { instructions } = await this.getSellInstructions(
+            // 6. Get sell instructions
+            const { instructions, signers } = await this.getSellInstructions(
                 seller.publicKey,
                 mintPubkey,
                 amountBN,
-                slippageBP
+                options.slippageBasisPoints || 100n
             );
 
-            // 9. 添加指令到交易
+            // 7. Add instructions to transaction
             instructions.forEach(instruction => transaction.add(instruction));
 
-            // 10. 获取最新区块哈希
+            // 8. Get latest blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -2297,7 +2258,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 11. 模拟交易
+            // 9. Simulate transaction first
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller],
@@ -2317,40 +2278,26 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
             }
 
-            // 12. 发送交易
-            let signature;
-            let retryCount = 0;
-            const maxRetries = 5;
-
-            while (retryCount < maxRetries) {
-                try {
-                    signature = await sendAndConfirmTransaction(
-                        this.connection,
-                        transaction,
-                        [seller],
-                        {
-                            skipPreflight: false,
-                            preflightCommitment: 'confirmed',
-                            commitment: 'confirmed',
-                            maxRetries: 3
-                        }
-                    );
-                    break;
-                } catch (sendError) {
-                    retryCount++;
-                    if (retryCount === maxRetries) {
-                        throw sendError;
-                    }
-                    await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
+            // 10. Send and confirm transaction
+            const signature = await sendAndConfirmTransaction(
+                this.connection,
+                transaction,
+                [seller],
+                {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                    commitment: 'confirmed',
+                    maxRetries: 3
                 }
-            }
+            );
 
             return {
                 success: true,
                 signature,
                 amount: amountBN.toString(),
                 mint: mintPubkey.toString(),
-                seller: seller.publicKey.toString()
+                seller: seller.publicKey.toString(),
+                timestamp: new Date().toISOString()
             };
 
         } catch (error) {
