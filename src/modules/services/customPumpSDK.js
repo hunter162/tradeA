@@ -1745,15 +1745,17 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 this.program.programId
             );
 
-            // 创建初始化指令，注意参数要匹配程序的要求
+            // 使用正确的方法名 initialize
             const initInstruction = await this.program.methods
-                .initializeAssociatedBondingCurve()  // 使用正确的初始化方法名
+                .initialize()  // 改为 initialize
                 .accounts({
+                    global: globalAccount.address,
                     bondingCurve: bondingCurveAddress,
                     associatedBondingCurve: associatedBondingCurveAddress,
                     user: user.publicKey,
-                    payer: user.publicKey,  // 添加支付账户
-                    systemProgram: SystemProgram.programId
+                    systemProgram: SystemProgram.programId,
+                    eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
+                    program: this.program.programId
                 })
                 .instruction();
 
@@ -1808,7 +1810,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;
         }
     }
-
     async ensureAssociatedBondingCurveExists(user, mint) {
         try {
             // 基础参数验证和转换
