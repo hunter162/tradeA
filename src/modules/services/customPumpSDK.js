@@ -1,41 +1,33 @@
 import {createRequire} from 'module';
-
-const require = createRequire(import.meta.url);
 import pkg from 'pumpdotfun-sdk';
 import {AnchorProvider, BorshCoder, Program} from "@coral-xyz/anchor";
-const {PumpFunSDK, GlobalAccount} = pkg;
 import {logger} from '../utils/index.js';
-import {PinataService} from './pinataService.js';
-import {config} from '../../config/index.js';
-import fs from 'fs/promises';
 
 import {
-    Transaction as SolanaTransaction,
-    SystemProgram,
-    LAMPORTS_PER_SOL,
-    SYSVAR_RENT_PUBKEY,
-    PublicKey,
     ComputeBudgetProgram,
-    Keypair, Transaction,
-    TransactionInstruction
+    Connection,
+    Keypair,
+    LAMPORTS_PER_SOL,
+    PublicKey,
+    sendAndConfirmTransaction,
+    SystemProgram,
+    Transaction as SolanaTransaction,
+    Transaction
 } from '@solana/web3.js';
 import {
-    TOKEN_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID,
+    createAssociatedTokenAccountInstruction,
     getAssociatedTokenAddress,
-    createAssociatedTokenAccountInstruction
+    TOKEN_PROGRAM_ID
 } from '@solana/spl-token';
 import BN from 'bn.js';
 import {JitoService, NOZOMI_CONFIG} from './jitoService.js';
 import axios from 'axios';
-import bs58 from 'bs58';
-import {Connection} from '@solana/web3.js';
-import WebSocket from 'ws';
-import https from 'https';
 import {WebSocketManager} from './webSocketManager.js';
-import {SolanaService} from './solanaService.js';
-import {sendAndConfirmTransaction} from '@solana/web3.js';
 import idlModule from 'pumpdotfun-sdk/dist/cjs/IDL/index.js';
+
+const require = createRequire(import.meta.url);
+const {PumpFunSDK, GlobalAccount} = pkg;
 const { IDL } = idlModule;
 const ACCOUNT_SIZES = {
     BondingCurve: 128,  // 8字节对齐的账户大小
@@ -2232,50 +2224,18 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             // 2. 获取全局账户
             const globalAccount = await this.getGlobalAccount();
-            const { feeRecipient } = await this.program.account.global.fetch(globalAccount);
+            if (!globalAccount) {
+                throw new Error('Failed to get global account');
+            }
 
-            logger.info('开始获取全局账户', {
-                globalAccount: globalAccount.toString()
-            });
+            const globalAccountInfo = await this.program.account.global.fetch(globalAccount);
+            if (!globalAccountInfo) {
+                throw new Error('Failed to fetch global account info');
+            }
 
-            // 3. 获取绑定曲线地址
-            const [bondingCurveAddress] = await PublicKey.findProgramAddress(
-                [
-                    Buffer.from('bonding-curve'),
-                    mintPubkey.toBuffer()
-                ],
-                this.program.programId
-            );
+            const { feeRecipient } = globalAccountInfo;
 
-            // 4. 获取关联绑定曲线地址
-            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
-                [
-                    Buffer.from('associated-bonding-curve'),
-                    bondingCurveAddress.toBuffer(),
-                    seller.publicKey.toBuffer()
-                ],
-                this.program.programId
-            );
-
-            logger.info('验证关联绑定曲线地址:', {
-                derived: associatedBondingCurveAddress.toString(),
-                expected: "5XpPcaFfm3zm3nac2T3M5AnQToJ65KfX6vDqthV8Xn2R",
-                mintPubkey: mintPubkey.toString(),
-                sellerPubkey: seller.publicKey.toString()
-            });
-
-            // 5. 获取绑定曲线状态
-            const bondingCurve = await this.program.account.bondingCurve.fetch(bondingCurveAddress);
-
-            logger.info('绑定曲线账户状态:', {
-                complete: bondingCurve.complete,
-                realSolReserves: bondingCurve.realSolReserves.toString(),
-                realTokenReserves: bondingCurve.realTokenReserves.toString(),
-                virtualSolReserves: bondingCurve.virtualSolReserves.toString(),
-                virtualTokenReserves: bondingCurve.virtualTokenReserves.toString()
-            });
-
-            // 6. Check token balance
+            // 3. 获取代币账户
             const tokenAccount = await this.findAssociatedTokenAddress(
                 seller.publicKey,
                 mintPubkey
@@ -2290,107 +2250,46 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 );
             }
 
-            // 7. 如果是卖出全部余额，则卖出95%以确保成功
+            // 4. 如果是卖出全部余额，则卖出95%
             if (amountBN.eq(availableAmount) || options.percentage === 100) {
                 const tokenBalanceBigInt = BigInt(tokenBalance.value.amount);
                 const adjustedAmountBigInt = (tokenBalanceBigInt * 95n) / 100n;
-                const adjustedAmount = new BN(adjustedAmountBigInt.toString());
-
-                logger.info('调整卖出数量为总额的95%:', {
-                    originalAmount: amountBN.toString(),
-                    adjustedAmount: adjustedAmount.toString()
-                });
-                amountBN = adjustedAmount;
+                amountBN = new BN(adjustedAmountBigInt.toString());
             }
 
-            // 8. 计算预期输出
-            const calculatedSolOutput = this.calculateSellOutput(
-                bondingCurve,
-                amountBN
-            );
-
-            const slippageBP = options.slippageBasisPoints || 100n;
-            const minSolOutput = calculatedSolOutput.muln(10000 - Number(slippageBP)).divn(10000);
-
-            logger.info('卖出详细参数:', {
-                seller: seller.publicKey.toString(),
-                mint: mintPubkey.toString(),
-                tokenAmount: amountBN.toString(),
-                calculatedSolOutput: calculatedSolOutput.toString(),
-                minSolOutput: minSolOutput.toString(),
-                slippageBasisPoints: slippageBP.toString(),
-                bondingCurveAddress: bondingCurveAddress.toString(),
-                associatedBondingCurve: associatedBondingCurveAddress.toString(),
-                associatedTokenAccount: tokenAccount.toString(),
-                globalAccount: {
-                    address: globalAccount.toString(),
-                    feeRecipient: feeRecipient.toString()
-                }
-            });
-
-            // 9. Create transaction
+            // 5. 构建指令
             const transaction = new Transaction();
 
-            // 10. 增加计算预算指令
+            // 6. 添加计算预算
             transaction.add(
                 ComputeBudgetProgram.setComputeUnitLimit({
                     units: 600000
                 })
             );
 
-            // 11. 增加优先费用指令
-            if (options.usePriorityFee || options.priorityFeeSol) {
-                const priorityFeeAmount = options.priorityFeeSol ?
-                    Math.floor(Number(options.priorityFeeSol) * 1000000) : 100000;
+            // 7. 添加优先级费用
+            const priorityFeeAmount = options.priorityFeeSol ?
+                Math.floor(Number(options.priorityFeeSol) * 1000000) : 100000;
 
-                transaction.add(
-                    ComputeBudgetProgram.setComputeUnitPrice({
-                        microLamports: priorityFeeAmount
-                    })
-                );
-
-                logger.info('添加优先费用:', { microLamports: priorityFeeAmount });
-            }
-
-            // 12. 构建卖出指令
-            const sellInstruction = await this.program.methods
-                .sell(amountBN, minSolOutput)
-                .accounts({
-                    global: globalAccount,
-                    feeRecipient,
-                    mint: mintPubkey,
-                    bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: associatedBondingCurveAddress,
-                    associatedUser: tokenAccount,
-                    user: seller.publicKey,
-                    systemProgram: SystemProgram.programId,
-                    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-                    tokenProgram: TOKEN_PROGRAM_ID,
+            transaction.add(
+                ComputeBudgetProgram.setComputeUnitPrice({
+                    microLamports: priorityFeeAmount
                 })
-                .instruction();
+            );
 
-            logger.info('卖出指令详情:', {
-                instruction: {
-                    programId: sellInstruction.programId.toString(),
-                    keys: sellInstruction.keys.map(key => ({
-                        name: key.pubkey.toString(),
-                        pubkey: key.pubkey.toString()
-                    })),
-                    data: {
-                        amount: amountBN.toString(),
-                        minSolOutput: minSolOutput.toString()
-                    },
-                    computeUnits: 600000
-                },
-                instructionsCount: transaction.instructions.length + 1,
-                bondingCurveDetails: {
-                    address: bondingCurveAddress.toString()
-                }
-            });
+            // 8. 创建卖出指令
+            const slippageBP = options.slippageBasisPoints || 100n;
+            const { instructions } = await this.getSellInstructions(
+                seller.publicKey,
+                mintPubkey,
+                amountBN,
+                slippageBP
+            );
 
-            transaction.add(sellInstruction);
+            // 9. 添加指令到交易
+            instructions.forEach(instruction => transaction.add(instruction));
 
-            // 13. Get latest blockhash
+            // 10. 获取最新区块哈希
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -2398,7 +2297,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 14. Simulate transaction
+            // 11. 模拟交易
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller],
@@ -2411,24 +2310,14 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             );
 
             if (simulation.value.err) {
-                logger.error('卖出交易模拟失败:', {
-                    error: JSON.stringify(simulation.value.err),
-                    logs: simulation.value.logs || [],
-                    instructions: transaction.instructions.map((ix, i) => ({
-                        index: i,
-                        programId: ix.programId.toString(),
-                        dataSize: ix.data ? ix.data.length : 0
-                    }))
+                logger.error('交易模拟失败:', {
+                    error: simulation.value.err,
+                    logs: simulation.value.logs
                 });
                 throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
             }
 
-            logger.info('交易模拟成功:', {
-                unitsConsumed: simulation.value.unitsConsumed,
-                logs: (simulation.value.logs || []).slice(0, 3)
-            });
-
-            // 15. Send and confirm transaction with retries
+            // 12. 发送交易
             let signature;
             let retryCount = 0;
             const maxRetries = 5;
@@ -2449,14 +2338,9 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     break;
                 } catch (sendError) {
                     retryCount++;
-                    logger.warn(`Transaction retry ${retryCount}/${maxRetries}:`, {
-                        error: sendError.message
-                    });
-
                     if (retryCount === maxRetries) {
                         throw sendError;
                     }
-
                     await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
                 }
             }
@@ -2466,8 +2350,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 signature,
                 amount: amountBN.toString(),
                 mint: mintPubkey.toString(),
-                seller: seller.publicKey.toString(),
-                timestamp: new Date().toISOString()
+                seller: seller.publicKey.toString()
             };
 
         } catch (error) {
