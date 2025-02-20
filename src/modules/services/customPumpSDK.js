@@ -2194,12 +2194,24 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
         try {
             return await this.withRetry(async () => {
+                // 确保转换为 BigInt
+                const tokenAmountBigInt = typeof sellTokenAmount === 'bigint' ?
+                    sellTokenAmount : BigInt(sellTokenAmount.toString());
+                const slippagePointsBigInt = typeof slippageBasisPoints === 'bigint' ?
+                    slippageBasisPoints : BigInt(slippageBasisPoints.toString());
+
+                // 获取 bonding curve 账户以检查状态
+                const bondingCurveAccount = await this.getBondingCurveAccount(mint);
+                if (!bondingCurveAccount) {
+                    throw new Error(`Bonding curve account not found: ${mint.toString()}`);
+                }
+
                 // 使用 SDK 的卖出指令方法
                 let sellTx = await super.getSellInstructionsByTokenAmount(
                     seller.publicKey,
                     mint,
-                    this.toBN(sellTokenAmount), // 确保转换为 BN 类型
-                    this.toBN(slippageBasisPoints), // 确保转换为 BN 类型
+                    tokenAmountBigInt,
+                    slippagePointsBigInt,
                     'confirmed'
                 );
 
@@ -2220,6 +2232,13 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 sellTx.lastValidBlockHeight = lastValidBlockHeight;
                 sellTx.feePayer = seller.publicKey;
 
+                logger.info('卖出交易构建成功:', {
+                    seller: seller.publicKey.toString(),
+                    mint: mint.toString(),
+                    amount: tokenAmountBigInt.toString(),
+                    slippage: slippagePointsBigInt.toString()
+                });
+
                 // 发送交易
                 const signature = await sendAndConfirmTransaction(
                     this.connection,
@@ -2236,7 +2255,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 return {
                     signature,
                     txId: signature,
-                    amount: sellTokenAmount.toString(),
+                    amount: tokenAmountBigInt.toString(),
                     mint: mint.toString(),
                     owner: seller.publicKey.toString(),
                     timestamp: new Date().toISOString(),
