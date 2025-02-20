@@ -1764,11 +1764,42 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mintPubkey
             );
 
-            // 6. Calculate minimum SOL output with slippage
+            // 修改: 正确获取关联绑定曲线地址
+            const associatedBondingCurveAddress = await this.findAssociatedBondingCurveAddress(
+                sellerPubkey,
+                mintPubkey
+            );
+
+            // 6. 检查绑定曲线状态
+            try {
+                const bondingCurveAccount = await this.program.account.bondingCurve.fetch(bondingCurveAddress);
+                if (bondingCurveAccount.complete) {
+                    logger.warn('注意: 该绑定曲线已完成 (complete=true)', {
+                        bondingCurve: bondingCurveAddress.toString(),
+                        mint: mintPubkey.toString()
+                    });
+                }
+
+                // 记录更详细的绑定曲线信息
+                logger.info('绑定曲线账户状态:', {
+                    virtualTokenReserves: bondingCurveAccount.virtualTokenReserves.toString(),
+                    virtualSolReserves: bondingCurveAccount.virtualSolReserves.toString(),
+                    realTokenReserves: bondingCurveAccount.realTokenReserves.toString(),
+                    realSolReserves: bondingCurveAccount.realSolReserves.toString(),
+                    complete: bondingCurveAccount.complete
+                });
+            } catch (error) {
+                logger.warn('获取绑定曲线状态失败:', {
+                    error: error.message,
+                    bondingCurve: bondingCurveAddress.toString()
+                });
+            }
+
+            // 7. Calculate minimum SOL output with slippage
             const calculatedSolOutput = await this.calculateSellSolOutput(mintPubkey, tokenAmount);
             const minSolOutput = await this.calculateWithSlippageSell(
                 calculatedSolOutput,
-                slippageBasisPoints || 100n
+                slippageBasisPoints || 2000n  // 默认使用20%滑点
             );
 
             // 添加详细的日志输出
@@ -1782,23 +1813,24 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     slippageBasisPoints.toString() : slippageBasisPoints,
                 bondingCurveAddress: bondingCurveAddress.toString(),
                 associatedTokenAccount: associatedTokenAccount.toString(),
+                associatedBondingCurve: associatedBondingCurveAddress.toString(),
                 globalAccount: {
                     address: globalAccount.address.toString(),
                     feeRecipient: globalAccount.feeRecipient.toString()
                 }
             });
 
-            // 7. Build instructions array
+            // 8. Build instructions array
             const instructions = [];
 
-            // Add compute budget instruction
+            // Add compute budget instruction with increased compute units
             instructions.push(
                 ComputeBudgetProgram.setComputeUnitLimit({
-                    units: 400000
+                    units: 600000  // 增加计算单元上限
                 })
             );
 
-            // 8. Create sell instruction
+            // 9. Create sell instruction with correct account assignments
             const sellInstruction = await this.program.methods
                 .sell(
                     new BN(tokenAmount.toString()),
@@ -1809,7 +1841,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     feeRecipient: globalAccount.feeRecipient,
                     mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: associatedTokenAccount,
+                    associatedBondingCurve: associatedBondingCurveAddress, // 使用正确的关联绑定曲线地址
                     associatedUser: associatedTokenAccount,
                     user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
@@ -1822,17 +1854,17 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             instructions.push(sellInstruction);
 
-            // 在创建指令之后添加日志
+            // 记录指令详情
             logger.info('卖出指令详情:', {
                 instruction: {
                     programId: this.program.programId.toString(),
-                    computeUnits: 400000,
+                    computeUnits: 600000,
                     keys: [
                         { name: 'global', pubkey: globalAccount.address.toString() },
                         { name: 'feeRecipient', pubkey: globalAccount.feeRecipient.toString() },
                         { name: 'mint', pubkey: mintPubkey.toString() },
                         { name: 'bondingCurve', pubkey: bondingCurveAddress.toString() },
-                        { name: 'associatedBondingCurve', pubkey: associatedTokenAccount.toString() },
+                        { name: 'associatedBondingCurve', pubkey: associatedBondingCurveAddress.toString() },
                         { name: 'associatedUser', pubkey: associatedTokenAccount.toString() },
                         { name: 'user', pubkey: sellerPubkey.toString() },
                         { name: 'systemProgram', pubkey: SystemProgram.programId.toString() },
@@ -1934,7 +1966,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             }
 
             const mintPubkey = this.ensurePublicKey(mint);
-            const amountBN = new BN(amount.toString());
+            let amountBN = new BN(amount.toString());
 
             logger.info('Starting sell operation:', {
                 seller: seller.publicKey.toString(),
@@ -1961,15 +1993,41 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 );
             }
 
+            // 修改: 如果是卖出全部余额，则卖出95%以确保成功
+            if (amountBN.eq(availableAmount) || options.percentage === 100) {
+                const adjustedAmount = new BN(
+                    Math.floor(BigInt(tokenBalance.value.amount) * 95n / 100n).toString()
+                );
+                logger.info('调整卖出数量为总额的95%:', {
+                    originalAmount: amountBN.toString(),
+                    adjustedAmount: adjustedAmount.toString()
+                });
+                amountBN = adjustedAmount;
+            }
+
             // 3. Create transaction
             const transaction = new Transaction();
 
-            // 4. Get instructions
+            // 修改: 增加优先费用指令
+            if (options.usePriorityFee || options.priorityFeeSol) {
+                const priorityFeeAmount = options.priorityFeeSol ?
+                    Math.floor(Number(options.priorityFeeSol) * 1000000) : 20000;
+
+                transaction.add(
+                    ComputeBudgetProgram.setComputeUnitPrice({
+                        microLamports: priorityFeeAmount
+                    })
+                );
+                logger.info('添加优先费用:', { microLamports: priorityFeeAmount });
+            }
+
+            // 4. Get instructions with increased slippage
+            const slippageBP = options.slippageBasisPoints || 2000n; // 默认20%滑点
             const { instructions, signers } = await this.getSellInstructions(
                 seller.publicKey,
                 mintPubkey,
                 amountBN,
-                options.slippageBasisPoints || 100n
+                slippageBP
             );
 
             // 5. Add all instructions to transaction
@@ -1983,20 +2041,35 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 7. Simulate transaction
+            // 7. Simulate transaction with detailed logs
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller, ...signers],
                 {
                     sigVerify: false,
                     commitment: 'confirmed',
-                    replaceRecentBlockhash: true
+                    replaceRecentBlockhash: true,
+                    encoding: 'jsonParsed'
                 }
             );
 
             if (simulation.value.err) {
+                logger.error('卖出交易模拟失败:', {
+                    error: JSON.stringify(simulation.value.err),
+                    logs: simulation.value.logs || [],
+                    instructions: transaction.instructions.map((ix, i) => ({
+                        index: i,
+                        programId: ix.programId.toString(),
+                        dataSize: ix.data ? ix.data.length : 0
+                    }))
+                });
                 throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
             }
+
+            logger.info('交易模拟成功:', {
+                unitsConsumed: simulation.value.unitsConsumed,
+                logs: (simulation.value.logs || []).slice(0, 3) // 记录前几行日志
+            });
 
             // 8. Send and confirm transaction
             const signature = await sendAndConfirmTransaction(
@@ -2007,7 +2080,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     skipPreflight: false,
                     preflightCommitment: 'confirmed',
                     commitment: 'confirmed',
-                    maxRetries: 3
+                    maxRetries: 5
                 }
             );
 
