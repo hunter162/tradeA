@@ -2191,74 +2191,88 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
     // customPumpSDK.js (sell 相关部分)
     // In CustomPumpSDK class
-    async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
+    async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100, priorityFees, options = {}) {
         try {
-            // Convert sellTokenAmount to BigInt if it's not already
-            const tokenAmountBigInt = typeof sellTokenAmount === 'bigint' ?
-                sellTokenAmount :
-                BigInt(sellTokenAmount.toString());
+            // Convert inputs to BN
+            const tokenAmountBN = toBN(sellTokenAmount);
+            const slippageBN = toBN(slippageBasisPoints);
 
-            // Convert slippageBasisPoints to BigInt if it's not already
-            const slippageBigInt = typeof slippageBasisPoints === 'bigint' ?
-                slippageBasisPoints :
-                BigInt(slippageBasisPoints.toString());
-
-            logger.info('卖出参数:', {
+            logger.info('Sell parameters:', {
                 seller: seller.publicKey.toString(),
                 mint: mint.toString(),
-                sellTokenAmount: tokenAmountBigInt.toString(),
-                slippageBasisPoints: slippageBigInt.toString(),
-                options: JSON.stringify(options)
+                amount: tokenAmountBN.toString(),
+                slippage: slippageBN.toString()
             });
 
-            return await this.withRetry(async () => {
-                // Get sell instructions with proper BigInt values
-                let sellTx = await super.getSellInstructionsByTokenAmount(
-                    seller.publicKey,
-                    mint,
-                    tokenAmountBigInt,
-                    slippageBigInt,
-                    'confirmed'
+            // Get sell instructions
+            const { transaction, signers } = await this.buildSellTransaction(
+                seller.publicKey,
+                mint,
+                tokenAmountBN,
+                slippageBN,
+                options
+            );
+
+            // Add priority fees if specified
+            if (priorityFees?.microLamports) {
+                transaction.add(
+                    ComputeBudgetProgram.setComputeUnitPrice({
+                        microLamports: priorityFees.microLamports
+                    })
                 );
+            }
 
-                // Rest of the sell method implementation...
-                // [Previous implementation continues here]
-            });
+            // Get latest blockhash
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('confirmed');
+
+            transaction.recentBlockhash = blockhash;
+            transaction.lastValidBlockHeight = lastValidBlockHeight;
+            transaction.feePayer = seller.publicKey;
+
+            // Send and confirm transaction
+            const signature = await sendAndConfirmTransaction(
+                this.connection,
+                transaction,
+                [seller, ...signers],
+                {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                    commitment: 'confirmed'
+                }
+            );
+
+            return {
+                signature,
+                status: 'success',
+                amount: tokenAmountBN.toString(),
+                mint: mint.toString(),
+                seller: seller.publicKey.toString()
+            };
+
         } catch (error) {
-            logger.error('❌ 卖出代币失败', {
+            logger.error('Sell transaction failed:', {
                 error: error.message,
                 mint: mint.toString(),
-                amount: sellTokenAmount.toString(),
-                slippage: `${Number(slippageBasisPoints) / 100}%`,
-                time: new Date().toISOString(),
-                endpoint: this.connection.rpcEndpoint
+                amount: sellTokenAmount.toString()
             });
             throw error;
         }
     }
-    _toBigInt(value) {
-        try {
-            if (typeof value === 'bigint') {
-                return value;
-            }
-            if (typeof value === 'number') {
-                return BigInt(Math.floor(value));
-            }
-            if (typeof value === 'string') {
-                return BigInt(value.replace(/[^\d]/g, ''));
-            }
-            if (value?.toString) {
-                return BigInt(value.toString().replace(/[^\d]/g, ''));
-            }
-            throw new Error(`Cannot convert ${typeof value} to BigInt`);
-        } catch (error) {
-            logger.error('BigInt conversion failed:', {
-                value: typeof value === 'object' ? JSON.stringify(value) : value,
-                type: typeof value,
-                error: error.message
-            });
-            throw error;
+    toBN(value) {
+        if (BN.isBN(value)) {
+            return value;
         }
+        if (typeof value === 'bigint') {
+            return new BN(value.toString());
+        }
+        if (typeof value === 'number') {
+            return new BN(Math.floor(value).toString());
+        }
+        if (typeof value === 'string') {
+            return new BN(value.replace(/[^\d]/g, ''));
+        }
+        throw new Error(`Cannot convert ${typeof value} to BN`);
     }
     async calculateWithSlippageSell(solOutput, slippageOptions) {
         try {
@@ -2306,7 +2320,89 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw new Error(`Failed to calculate sell slippage: ${error.message}`);
         }
     }
+    async buildSellTransaction(seller, mint, amount, slippage, options = {}) {
+        const transaction = new Transaction();
 
+        // Get accounts
+        const bondingCurve = await this.findBondingCurveAddress(mint);
+        const tokenAccount = await this.findAssociatedTokenAddress(seller, mint);
+
+        // Calculate minimum output
+        const calculatedOutput = await this.calculateSellOutput(mint, amount);
+        const minOutput = calculateMinimumOutput(calculatedOutput, slippage);
+
+        // Add compute budget instruction
+        transaction.add(
+            ComputeBudgetProgram.setComputeUnitLimit({
+                units: 400000
+            })
+        );
+
+        // Build sell instruction
+        const sellInstruction = await this.program.methods
+            .sell(amount, minOutput)
+            .accounts({
+                user: seller,
+                mint: mint,
+                bondingCurve: bondingCurve,
+                userToken: tokenAccount,
+                systemProgram: SystemProgram.programId,
+                tokenProgram: TOKEN_PROGRAM_ID
+            })
+            .instruction();
+
+        transaction.add(sellInstruction);
+
+        return {
+            transaction,
+            signers: []
+        };
+    }
+    async calculateSellOutput(mint, tokenAmount) {
+        try {
+            const bondingCurve = await this.findBondingCurveAddress(mint);
+            const account = await this.program.account.bondingCurve.fetch(bondingCurve);
+
+            const currentTokenReserves = toBN(account.virtualTokenReserves);
+            const currentSolReserves = toBN(account.virtualSolReserves);
+            const sellAmount = toBN(tokenAmount);
+
+            // Ensure not selling more than available
+            const newTokenReserves = currentTokenReserves.sub(sellAmount);
+            if (newTokenReserves.ltn(0)) {
+                throw new Error('Insufficient token reserves');
+            }
+
+            // Calculate output using bonding curve formula
+            const k = currentSolReserves.mul(currentTokenReserves);
+            const newSolReserves = k.div(newTokenReserves);
+            return newSolReserves.sub(currentSolReserves);
+        } catch (error) {
+            throw new Error(`Failed to calculate sell output: ${error.message}`);
+        }
+    }
+
+    calculateMinimumOutput(amount, slippageBasisPoints) {
+        try {
+            const amountBN = toBN(amount);
+            const basisPointsBN = toBN(slippageBasisPoints);
+            const TEN_THOUSAND = new BN(10000);
+
+            // Calculate slippage amount
+            const slippageAmount = amountBN.mul(basisPointsBN).div(TEN_THOUSAND);
+
+            // Subtract slippage for minimum output
+            const minOutput = amountBN.sub(slippageAmount);
+
+            if (minOutput.ltn(0)) {
+                throw new Error('Slippage calculation resulted in negative amount');
+            }
+
+            return minOutput;
+        } catch (error) {
+            throw new Error(`Failed to calculate minimum output: ${error.message}`);
+        }
+    }
 
 // 辅助方法：检查账户是否存在
     async checkAccountExists(address) {
