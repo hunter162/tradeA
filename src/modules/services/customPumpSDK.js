@@ -1771,6 +1771,23 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 slippageBasisPoints || 100n
             );
 
+            // 添加详细的日志输出
+            logger.info('卖出详细参数:', {
+                seller: sellerPubkey.toString(),
+                mint: mintPubkey.toString(),
+                tokenAmount: tokenAmount.toString(),
+                calculatedSolOutput: calculatedSolOutput.toString(),
+                minSolOutput: minSolOutput.toString(),
+                slippageBasisPoints: typeof slippageBasisPoints === 'bigint' ?
+                    slippageBasisPoints.toString() : slippageBasisPoints,
+                bondingCurveAddress: bondingCurveAddress.toString(),
+                associatedTokenAccount: associatedTokenAccount.toString(),
+                globalAccount: {
+                    address: globalAccount.address.toString(),
+                    feeRecipient: globalAccount.feeRecipient.toString()
+                }
+            });
+
             // 7. Build instructions array
             const instructions = [];
 
@@ -1804,6 +1821,36 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 .instruction();
 
             instructions.push(sellInstruction);
+
+            // 在创建指令之后添加日志
+            logger.info('卖出指令详情:', {
+                instruction: {
+                    programId: this.program.programId.toString(),
+                    computeUnits: 400000,
+                    keys: [
+                        { name: 'global', pubkey: globalAccount.address.toString() },
+                        { name: 'feeRecipient', pubkey: globalAccount.feeRecipient.toString() },
+                        { name: 'mint', pubkey: mintPubkey.toString() },
+                        { name: 'bondingCurve', pubkey: bondingCurveAddress.toString() },
+                        { name: 'associatedBondingCurve', pubkey: associatedTokenAccount.toString() },
+                        { name: 'associatedUser', pubkey: associatedTokenAccount.toString() },
+                        { name: 'user', pubkey: sellerPubkey.toString() },
+                        { name: 'systemProgram', pubkey: SystemProgram.programId.toString() },
+                        { name: 'associatedTokenProgram', pubkey: ASSOCIATED_TOKEN_PROGRAM_ID.toString() },
+                        { name: 'tokenProgram', pubkey: TOKEN_PROGRAM_ID.toString() },
+                        { name: 'eventAuthority', pubkey: 'Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1' },
+                        { name: 'program', pubkey: this.program.programId.toString() }
+                    ],
+                    data: {
+                        amount: tokenAmount.toString(),
+                        minSolOutput: minSolOutput.toString()
+                    }
+                },
+                bondingCurveDetails: {
+                    address: bondingCurveAddress.toString()
+                },
+                instructionsCount: instructions.length
+            });
 
             return {
                 instructions,
