@@ -1816,15 +1816,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const userPubkey = this.ensurePublicKey(user);
             const mintPubkey = this.ensurePublicKey(mint);
 
-            logger.info('Checking associated bonding curve', {
+            logger.info('检查关联绑定曲线账户', {
                 user: userPubkey.toString(),
                 mint: mintPubkey.toString()
             });
 
-            // 修改：只使用mint地址来查找bonding curve
+            // 正确生成关联绑定曲线地址 (包含 user 和 mint)
             const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
                 [
                     Buffer.from('associated-bonding-curve'),
+                    userPubkey.toBuffer(),
                     mintPubkey.toBuffer()
                 ],
                 this.program.programId
@@ -1834,98 +1835,28 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
 
             if (accountInfo) {
-                logger.info('Associated bonding curve already exists', {
+                logger.info('关联绑定曲线账户已存在', {
                     address: associatedBondingCurveAddress.toString(),
                     size: accountInfo.data?.length || 0
                 });
                 return true;
             }
 
-            logger.info('Associated bonding curve does not exist, making a minimal buy to initialize', {
+            logger.info('关联绑定曲线账户不存在，初始化中...', {
                 address: associatedBondingCurveAddress.toString()
             });
 
-            // 最小购买金额增加以确保成功
-            const minimalBuyAmount = BigInt(20000); // 0.00002 SOL
+            // 调用初始化方法
+            await this.initializeAssociatedBondingCurve(user, mintPubkey);
 
-            // 创建交易
-            const transaction = new Transaction();
-
-            // 增加计算预算
-            transaction.add(
-                ComputeBudgetProgram.setComputeUnitLimit({
-                    units: 400000
-                })
-            );
-
-            // 增加优先级费用
-            transaction.add(
-                ComputeBudgetProgram.setComputeUnitPrice({
-                    microLamports: 100000 // 增加优先级费用以确保更快处理
-                })
-            );
-
-            // 获取购买指令
-            const buyInstructions = await super.getBuyInstructionsBySolAmount(
-                userPubkey,
-                mintPubkey,
-                minimalBuyAmount,
-                250n, // 增加滑点到2.5%
-                'confirmed'
-            );
-
-            // 添加指令到交易
-            if (Array.isArray(buyInstructions.instructions)) {
-                buyInstructions.instructions.forEach(ix => transaction.add(ix));
-            } else if (buyInstructions.instructions) {
-                buyInstructions.instructions.forEach(ix => transaction.add(ix));
-            } else if (buyInstructions.add) {
-                const txInstructions = buyInstructions._instructions ||
-                    buyInstructions.instructions ||
-                    [];
-                txInstructions.forEach(ix => transaction.add(ix));
-            }
-
-            // 获取最新的区块哈希
-            const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
-
-            transaction.recentBlockhash = blockhash;
-            transaction.lastValidBlockHeight = lastValidBlockHeight;
-            transaction.feePayer = userPubkey instanceof PublicKey ? userPubkey : user.publicKey;
-
-            // 确定签名者
-            let signers = [];
-            if (user.secretKey || user.keypair) {
-                signers.push(user);
-            }
-
-            // 发送交易
-            const signature = await this.sendTransactionWithLogs(
-                this.connection,
-                transaction,
-                signers,
-                {
-                    skipPreflight: false,
-                    preflightCommitment: 'confirmed',
-                    commitment: 'confirmed',
-                    maxRetries: 5
-                }
-            );
-
-            logger.info('Minimal buy transaction sent to initialize associated bonding curve', {
-                signature,
-                associatedBondingCurve: associatedBondingCurveAddress.toString()
-            });
-
-            // 增加验证重试次数和等待时间
-            const maxVerificationRetries = 8; // 增加重试次数
+            // 等待并验证账户创建
+            const maxVerificationRetries = 8;
             let verificationRetry = 0;
             let accountCreated = false;
 
             while (verificationRetry < maxVerificationRetries && !accountCreated) {
-                const waitTime = 4000 + (verificationRetry * 2000); // 4s, 6s, 8s...
-                logger.info(`Waiting ${waitTime/1000}s for account creation (attempt ${verificationRetry+1}/${maxVerificationRetries})...`);
+                const waitTime = 4000 + (verificationRetry * 2000);
+                logger.info(`等待账户创建验证 (${verificationRetry + 1}/${maxVerificationRetries})...`);
                 await new Promise(resolve => setTimeout(resolve, waitTime));
 
                 const updatedInfo = await this.connection.getAccountInfo(
@@ -1935,13 +1866,13 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
                 if (updatedInfo) {
                     accountCreated = true;
-                    logger.info('Associated bonding curve successfully created', {
+                    logger.info('关联绑定曲线账户创建成功', {
                         address: associatedBondingCurveAddress.toString(),
                         size: updatedInfo.data?.length || 0,
                         owner: updatedInfo.owner?.toString()
                     });
                 } else {
-                    logger.warn(`Account verification attempt ${verificationRetry+1} failed`, {
+                    logger.warn(`账户验证尝试 ${verificationRetry + 1} 失败`, {
                         address: associatedBondingCurveAddress.toString()
                     });
                 }
@@ -1950,19 +1881,19 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             }
 
             if (!accountCreated) {
-                throw new Error('Failed to initialize associated bonding curve after multiple attempts');
+                throw new Error('关联绑定曲线账户初始化失败');
             }
 
             return true;
 
         } catch (error) {
-            logger.error('Failed to ensure associated bonding curve exists', {
+            logger.error('确保关联绑定曲线账户存在失败', {
                 error: error.message,
                 user: user?.publicKey?.toString() || user?.toString(),
                 mint: mint?.toString(),
                 stack: error.stack
             });
-            return false;
+            throw error;  // 抛出错误以便上层处理
         }
     }
     async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
@@ -2199,7 +2130,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     // In CustomPumpSDK class
     async sell(seller, mint, amount, options = {}) {
         try {
-            // 1. Basic validation
+            // 1. 基础验证
             if (!seller || !seller.publicKey) {
                 throw new Error('Invalid seller wallet');
             }
@@ -2213,7 +2144,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const mintPubkey = this.ensurePublicKey(mint);
             let amountBN = new BN(amount.toString());
 
-            logger.info('Starting sell operation:', {
+            logger.info('开始卖出操作:', {
                 seller: seller.publicKey.toString(),
                 mint: mintPubkey.toString(),
                 amount: amountBN.toString(),
@@ -2223,10 +2154,25 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             });
 
-            // 4. Create transaction
+            // 2. 初始化 provider
+            if (!this.program) {
+                await this.initializeProvider(seller);
+            }
+
+            // 3. 确保关联绑定曲线账户存在
+            await this.ensureAssociatedBondingCurveExists(seller, mintPubkey);
+
+            // 4. 创建交易
             const transaction = new Transaction();
 
-            // 5. 增加优先费用指令
+            // 5. 增加计算预算指令
+            transaction.add(
+                ComputeBudgetProgram.setComputeUnitLimit({
+                    units: 600000
+                })
+            );
+
+            // 6. 增加优先费用指令
             if (options.usePriorityFee || options.priorityFeeSol) {
                 const priorityFeeAmount = options.priorityFeeSol ?
                     Math.floor(Number(options.priorityFeeSol) * 1000000) : 100000;
@@ -2239,7 +2185,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 logger.info('添加优先费用:', { microLamports: priorityFeeAmount });
             }
 
-            // 6. Get sell instructions
+            // 7. 获取卖出指令
             const { instructions, signers } = await this.getSellInstructions(
                 seller.publicKey,
                 mintPubkey,
@@ -2247,10 +2193,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 options.slippageBasisPoints || 100n
             );
 
-            // 7. Add instructions to transaction
+            // 8. 添加指令到交易
             instructions.forEach(instruction => transaction.add(instruction));
 
-            // 8. Get latest blockhash
+            // 9. 获取最新的区块哈希
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -2258,7 +2204,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 9. Simulate transaction first
+            // 10. 先模拟交易
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller],
@@ -2278,30 +2224,62 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
             }
 
-            // 10. Send and confirm transaction
-            const signature = await sendAndConfirmTransaction(
-                this.connection,
-                transaction,
-                [seller],
-                {
-                    skipPreflight: false,
-                    preflightCommitment: 'confirmed',
-                    commitment: 'confirmed',
-                    maxRetries: 3
-                }
-            );
+            logger.info('交易模拟成功:', {
+                logs: simulation.value.logs,
+                unitsConsumed: simulation.value.unitsConsumed
+            });
 
-            return {
+            // 11. 发送并确认交易
+            let signature;
+            if (options.usePriorityFee && options.priorityType === 'nozomi') {
+                signature = await this.sendTransactionViaNozomi(
+                    transaction,
+                    [seller],
+                    NOZOMI_CONFIG
+                );
+            } else {
+                signature = await sendAndConfirmTransaction(
+                    this.connection,
+                    transaction,
+                    [seller],
+                    {
+                        skipPreflight: false,
+                        preflightCommitment: 'confirmed',
+                        commitment: 'confirmed',
+                        maxRetries: 3
+                    }
+                );
+            }
+
+            // 12. 构建结果
+            const result = {
                 success: true,
                 signature,
                 amount: amountBN.toString(),
                 mint: mintPubkey.toString(),
                 seller: seller.publicKey.toString(),
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
+                endpoint: this.connection.rpcEndpoint,
+                priorityFee: options.usePriorityFee ? {
+                    type: options.priorityType || 'default',
+                    amount: options.priorityFeeSol
+                } : undefined,
+                simulation: {
+                    computeUnits: simulation.value.unitsConsumed || 0
+                }
             };
 
+            logger.info('卖出交易成功:', {
+                signature: result.signature,
+                seller: seller.publicKey.toString(),
+                mint: mintPubkey.toString(),
+                amount: amountBN.toString()
+            });
+
+            return result;
+
         } catch (error) {
-            logger.error('Sell operation failed:', {
+            logger.error('卖出操作失败:', {
                 error: error.message,
                 seller: seller?.publicKey?.toString(),
                 mint: mint?.toString?.(),
