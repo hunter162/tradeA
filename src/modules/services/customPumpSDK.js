@@ -1747,11 +1747,12 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             // 使用正确的方法名 initialize
             const initInstruction = await this.program.methods
-                .initialize()  // 改为 initialize
+                .initialize()
                 .accounts({
                     global: globalAccount.address,
                     bondingCurve: bondingCurveAddress,
                     associatedBondingCurve: associatedBondingCurveAddress,
+                    payer: user.publicKey, // 添加支付者
                     user: user.publicKey,
                     systemProgram: SystemProgram.programId,
                     eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
