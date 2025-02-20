@@ -2315,7 +2315,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
         // Calculate minimum output
         const calculatedOutput = await this.calculateSellOutput(mint, amount);
-        const minOutput = calculateMinimumOutput(calculatedOutput, slippage);
+        const minOutput = this.calculateMinimumOutput(calculatedOutput, slippage);
 
         // Add compute budget instruction
         transaction.add(
