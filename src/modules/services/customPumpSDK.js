@@ -1731,6 +1731,84 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;
         }
     }
+    // Add to CustomPumpSDK class:
+    async initializeAssociatedBondingCurve(user, mint) {
+        try {
+            logger.info('Initializing associated bonding curve', {
+                user: user.publicKey.toString(),
+                mint: mint.toString()
+            });
+
+            // Get required accounts
+            const bondingCurveAddress = await this.findBondingCurveAddress(mint);
+            const globalAccount = await this.getGlobalAccount();
+
+            // Create the associated bonding curve account
+            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('associated-bonding-curve'),
+                    user.publicKey.toBuffer(),
+                    mint.toBuffer()
+                ],
+                this.program.programId
+            );
+
+            // Build initialization instruction
+            const initInstruction = await this.program.methods
+                .initializeAssociatedBondingCurve()
+                .accounts({
+                    global: globalAccount.address,
+                    bondingCurve: bondingCurveAddress,
+                    associatedBondingCurve: associatedBondingCurveAddress,
+                    user: user.publicKey,
+                    systemProgram: SystemProgram.programId,
+                })
+                .instruction();
+
+            // Create and send transaction
+            const tx = new Transaction();
+            tx.add(initInstruction);
+
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('confirmed');
+
+            tx.recentBlockhash = blockhash;
+            tx.lastValidBlockHeight = lastValidBlockHeight;
+            tx.feePayer = user.publicKey;
+
+            const signature = await this.sendTransactionWithLogs(
+                this.connection,
+                tx,
+                [user],
+                {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                    commitment: 'confirmed',
+                    maxRetries: 3
+                }
+            );
+
+            logger.info('Associated bonding curve initialized', {
+                signature,
+                address: associatedBondingCurveAddress.toString()
+            });
+
+            return {
+                success: true,
+                signature,
+                address: associatedBondingCurveAddress.toString()
+            };
+        } catch (error) {
+            logger.error('Failed to initialize associated bonding curve', {
+                error: error.message,
+                user: user?.publicKey?.toString(),
+                mint: mint?.toString()
+            });
+            throw error;
+        }
+    }
+
+
     async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
         try {
             // 1. Input validation
@@ -1991,7 +2069,32 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             });
 
-            // 2. Check token balance
+            // 2. Check if associated bonding curve exists
+            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('associated-bonding-curve'),
+                    seller.publicKey.toBuffer(),
+                    mintPubkey.toBuffer()
+                ],
+                this.program.programId
+            );
+
+            // Check if account exists
+            const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
+
+            // If account doesn't exist, initialize it first
+            if (!accountInfo) {
+                logger.info('Associated bonding curve not found, initializing first...', {
+                    address: associatedBondingCurveAddress.toString()
+                });
+
+                await this.initializeAssociatedBondingCurve(seller, mintPubkey);
+
+                // Wait a moment for the account to be confirmed
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+            // 3. Check token balance
             const tokenAccount = await this.findAssociatedTokenAddress(
                 seller.publicKey,
                 mintPubkey
@@ -2020,7 +2123,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 amountBN = adjustedAmount;
             }
 
-            // 3. Create transaction
+            // 4. Create transaction
             const transaction = new Transaction();
 
             // 修改: 增加优先费用指令
@@ -2036,7 +2139,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 logger.info('添加优先费用:', { microLamports: priorityFeeAmount });
             }
 
-            // 4. Get instructions with increased slippage
+            // 5. Get instructions with increased slippage
             const slippageBP = options.slippageBasisPoints || 2000n; // 默认20%滑点
             const { instructions, signers } = await this.getSellInstructions(
                 seller.publicKey,
@@ -2045,10 +2148,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 slippageBP
             );
 
-            // 5. Add all instructions to transaction
+            // 6. Add all instructions to transaction
             instructions.forEach(instruction => transaction.add(instruction));
 
-            // 6. Get latest blockhash
+            // 7. Get latest blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -2056,7 +2159,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 7. Simulate transaction with detailed logs
+            // 8. Simulate transaction with detailed logs
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller, ...signers],
@@ -2086,7 +2189,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 logs: (simulation.value.logs || []).slice(0, 3) // 记录前几行日志
             });
 
-            // 8. Send and confirm transaction
+            // 9. Send and confirm transaction
             const signature = await sendAndConfirmTransaction(
                 this.connection,
                 transaction,
