@@ -199,11 +199,6 @@ export class TokenTradeService {
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         let keypair;
         try {
-            // 1. 验证输入
-            if (percentage <= 0 || percentage > 1) {
-                throw new Error('Percentage must be between 0 and 1');
-            }
-
             // 2. 获取钱包
             keypair = await this.solanaService.walletService.getWalletKeypair(groupType, accountNumber);
             if (!keypair) {
