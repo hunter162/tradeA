@@ -2230,7 +2230,52 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             });
 
-            // 2. Check token balance
+            // 2. 获取全局账户
+            const globalAccount = await this.getGlobalAccount();
+            const { feeRecipient } = await this.program.account.global.fetch(globalAccount);
+
+            logger.info('开始获取全局账户', {
+                globalAccount: globalAccount.toString()
+            });
+
+            // 3. 获取绑定曲线地址
+            const [bondingCurveAddress] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('bonding-curve'),
+                    mintPubkey.toBuffer()
+                ],
+                this.program.programId
+            );
+
+            // 4. 获取关联绑定曲线地址
+            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('associated-bonding-curve'),
+                    bondingCurveAddress.toBuffer(),
+                    seller.publicKey.toBuffer()
+                ],
+                this.program.programId
+            );
+
+            logger.info('验证关联绑定曲线地址:', {
+                derived: associatedBondingCurveAddress.toString(),
+                expected: "5XpPcaFfm3zm3nac2T3M5AnQToJ65KfX6vDqthV8Xn2R",
+                mintPubkey: mintPubkey.toString(),
+                sellerPubkey: seller.publicKey.toString()
+            });
+
+            // 5. 获取绑定曲线状态
+            const bondingCurve = await this.program.account.bondingCurve.fetch(bondingCurveAddress);
+
+            logger.info('绑定曲线账户状态:', {
+                complete: bondingCurve.complete,
+                realSolReserves: bondingCurve.realSolReserves.toString(),
+                realTokenReserves: bondingCurve.realTokenReserves.toString(),
+                virtualSolReserves: bondingCurve.virtualSolReserves.toString(),
+                virtualTokenReserves: bondingCurve.virtualTokenReserves.toString()
+            });
+
+            // 6. Check token balance
             const tokenAccount = await this.findAssociatedTokenAddress(
                 seller.publicKey,
                 mintPubkey
@@ -2245,7 +2290,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 );
             }
 
-            // 3. 如果是卖出全部余额，则卖出95%以确保成功
+            // 7. 如果是卖出全部余额，则卖出95%以确保成功
             if (amountBN.eq(availableAmount) || options.percentage === 100) {
                 const tokenBalanceBigInt = BigInt(tokenBalance.value.amount);
                 const adjustedAmountBigInt = (tokenBalanceBigInt * 95n) / 100n;
@@ -2258,10 +2303,42 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 amountBN = adjustedAmount;
             }
 
-            // 4. Create transaction
+            // 8. 计算预期输出
+            const calculatedSolOutput = this.calculateSellOutput(
+                bondingCurve,
+                amountBN
+            );
+
+            const slippageBP = options.slippageBasisPoints || 100n;
+            const minSolOutput = calculatedSolOutput.muln(10000 - Number(slippageBP)).divn(10000);
+
+            logger.info('卖出详细参数:', {
+                seller: seller.publicKey.toString(),
+                mint: mintPubkey.toString(),
+                tokenAmount: amountBN.toString(),
+                calculatedSolOutput: calculatedSolOutput.toString(),
+                minSolOutput: minSolOutput.toString(),
+                slippageBasisPoints: slippageBP.toString(),
+                bondingCurveAddress: bondingCurveAddress.toString(),
+                associatedBondingCurve: associatedBondingCurveAddress.toString(),
+                associatedTokenAccount: tokenAccount.toString(),
+                globalAccount: {
+                    address: globalAccount.toString(),
+                    feeRecipient: feeRecipient.toString()
+                }
+            });
+
+            // 9. Create transaction
             const transaction = new Transaction();
 
-            // 5. 增加优先费用指令
+            // 10. 增加计算预算指令
+            transaction.add(
+                ComputeBudgetProgram.setComputeUnitLimit({
+                    units: 600000
+                })
+            );
+
+            // 11. 增加优先费用指令
             if (options.usePriorityFee || options.priorityFeeSol) {
                 const priorityFeeAmount = options.priorityFeeSol ?
                     Math.floor(Number(options.priorityFeeSol) * 1000000) : 100000;
@@ -2272,28 +2349,48 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     })
                 );
 
-                transaction.add(
-                    ComputeBudgetProgram.setComputeUnitLimit({
-                        units: 400000
-                    })
-                );
-
                 logger.info('添加优先费用:', { microLamports: priorityFeeAmount });
             }
 
-            // 6. Get instructions with increased slippage
-            const slippageBP = options.slippageBasisPoints || 2000n; // 默认20%滑点
-            const { instructions, signers } = await this.getSellInstructions(
-                seller.publicKey,
-                mintPubkey,
-                amountBN,
-                slippageBP
-            );
+            // 12. 构建卖出指令
+            const sellInstruction = await this.program.methods
+                .sell(amountBN, minSolOutput)
+                .accounts({
+                    global: globalAccount,
+                    feeRecipient,
+                    mint: mintPubkey,
+                    bondingCurve: bondingCurveAddress,
+                    associatedBondingCurve: associatedBondingCurveAddress,
+                    associatedUser: tokenAccount,
+                    user: seller.publicKey,
+                    systemProgram: SystemProgram.programId,
+                    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                })
+                .instruction();
 
-            // 7. Add all instructions to transaction
-            instructions.forEach(instruction => transaction.add(instruction));
+            logger.info('卖出指令详情:', {
+                instruction: {
+                    programId: sellInstruction.programId.toString(),
+                    keys: sellInstruction.keys.map(key => ({
+                        name: key.pubkey.toString(),
+                        pubkey: key.pubkey.toString()
+                    })),
+                    data: {
+                        amount: amountBN.toString(),
+                        minSolOutput: minSolOutput.toString()
+                    },
+                    computeUnits: 600000
+                },
+                instructionsCount: transaction.instructions.length + 1,
+                bondingCurveDetails: {
+                    address: bondingCurveAddress.toString()
+                }
+            });
 
-            // 8. Get latest blockhash
+            transaction.add(sellInstruction);
+
+            // 13. Get latest blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -2301,10 +2398,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 9. Simulate transaction
+            // 14. Simulate transaction
             const simulation = await this.connection.simulateTransaction(
                 transaction,
-                [seller, ...signers],
+                [seller],
                 {
                     sigVerify: false,
                     commitment: 'confirmed',
@@ -2331,7 +2428,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 logs: (simulation.value.logs || []).slice(0, 3)
             });
 
-            // 10. Send and confirm transaction with retries
+            // 15. Send and confirm transaction with retries
             let signature;
             let retryCount = 0;
             const maxRetries = 5;
@@ -2341,7 +2438,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     signature = await sendAndConfirmTransaction(
                         this.connection,
                         transaction,
-                        [seller, ...signers],
+                        [seller],
                         {
                             skipPreflight: false,
                             preflightCommitment: 'confirmed',
@@ -2349,7 +2446,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                             maxRetries: 3
                         }
                     );
-                    break;  // 如果交易成功，跳出循环
+                    break;
                 } catch (sendError) {
                     retryCount++;
                     logger.warn(`Transaction retry ${retryCount}/${maxRetries}:`, {
@@ -2357,10 +2454,9 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     });
 
                     if (retryCount === maxRetries) {
-                        throw sendError;  // 如果达到最大重试次数，抛出错误
+                        throw sendError;
                     }
 
-                    // 等待后重试，时间逐渐增加
                     await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
                 }
             }
