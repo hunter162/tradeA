@@ -199,144 +199,130 @@ export class TokenTradeService {
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         let keypair;
         try {
-            // 1. 获取钱包
+            // 1. 验证输入
+            if (percentage <= 0 || percentage > 1) {
+                throw new Error('Percentage must be between 0 and 1');
+            }
+
+            // 2. 获取钱包
             keypair = await this.solanaService.walletService.getWalletKeypair(groupType, accountNumber);
             if (!keypair) {
                 throw new Error('Wallet not found');
             }
 
-            // 2. 获取代币余额
-            const tokenBalanceResponse = await this.solanaService.getTokenBalance(
-                keypair.publicKey.toString(),
-                tokenAddress
-            );
+            // 3. 获取代币信息和余额
+            const [tokenInfo, tokenBalance] = await Promise.all([
+                this.getTokenInfo(tokenAddress),
+                this.solanaService.getTokenBalance(
+                    keypair.publicKey.toString(),
+                    tokenAddress
+                )
+            ]);
 
-            // 3. 验证和转换余额响应
-            let rawBalance;
-            if (typeof tokenBalanceResponse === 'string' || typeof tokenBalanceResponse === 'number') {
-                // 如果是直接的数值，直接使用
-                rawBalance = BigInt(tokenBalanceResponse.toString());
-            } else if (tokenBalanceResponse?.value?.amount) {
-                // 如果是标准的 token 账户余额响应格式
-                rawBalance = BigInt(tokenBalanceResponse.value.amount);
-            } else {
-                logger.error('无效的代币余额响应:', {
-                    response: tokenBalanceResponse,
-                    tokenAddress,
-                    wallet: keypair.publicKey.toString()
-                });
-                throw new Error('Invalid token balance response');
-            }
+            // 4. 转换代币余额为 BigInt
+            const rawBalance = this._parseTokenBalance(tokenBalance);
 
-            logger.info('代币余额检查:', {
-                rawBalance: rawBalance.toString(),
-                tokenAddress,
-                wallet: keypair.publicKey.toString()
-            });
+            // 5. 计算卖出数量 (使用高精度计算)
+            const PRECISION = 1_000_000n; // 使用 6 位精度
+            const scaledPercentage = BigInt(Math.round(percentage * Number(PRECISION)));
+            const sellAmount = (rawBalance * scaledPercentage) / PRECISION;
 
-            // 4. 获取代币信息
-            const tokenInfo = await this.getTokenInfo(tokenAddress);
-
-            // 5. 计算卖出数量
-            const percentageBN = BigInt(Math.floor(percentage * 100));
-            const sellAmount = (rawBalance * percentageBN) / BigInt(10000);
-
-            logger.info('计算卖出数量:', {
-                tokenAddress,
+            logger.info('Sell amount calculation:', {
                 rawBalance: rawBalance.toString(),
                 percentage,
+                scaledPercentage: scaledPercentage.toString(),
                 sellAmount: sellAmount.toString(),
-                decimals: tokenInfo.decimals || 9  // 使用代币信息中的小数位数，默认为 9
+                tokenDecimals: tokenInfo.decimals || 9
             });
 
-            // 6. 验证数量
+            // 6. 验证卖出数量
             if (sellAmount <= 0n) {
                 throw new Error('Invalid sell amount (zero or negative)');
             }
-
             if (sellAmount > rawBalance) {
-                throw new Error(
-                    `Insufficient token balance. Available: ${rawBalance}, Required: ${sellAmount}`
-                );
+                throw new Error(`Insufficient balance. Have: ${rawBalance}, Need: ${sellAmount}`);
             }
 
-            // 7. 创建 SDK 实例
+            // 7. 执行卖出
             const sdk = new CustomPumpSDK(this.solanaService.connection);
             sdk.setSolanaService(this.solanaService);
 
-            // 8. 执行卖出
             const result = await sdk.sell(
                 keypair,
                 new PublicKey(tokenAddress),
                 sellAmount,
                 {
                     ...options,
-                    slippageBasisPoints: options.slippage ? BigInt(options.slippage * 100) : 100n,
+                    slippageBasisPoints: options.slippage ?
+                        BigInt(Math.round(options.slippage * 100)) : 100n,
                     decimals: tokenInfo.decimals || 9
                 }
             );
 
-            // 9. 验证结果
-            if (!result || !result.signature) {
-                throw new Error('Transaction failed: No signature received');
-            }
-
-            // 10. 保存交易记录
-            await this.saveTradeTransaction({
-                signature: result.signature,
-                mint: tokenAddress,
-                owner: keypair.publicKey.toString(),
-                type: 'sell',
-                amount: sellAmount.toString(),
-                tokenAmount: sellAmount.toString(),
-                tokenDecimals: tokenInfo.decimals || 9,
-                metadata: {
-                    percentage,
-                    options,
-                    rawBalance: rawBalance.toString()
-                }
-            });
-
-            // 11. 更新余额缓存
-            await this.updateBalanceCache(keypair, tokenAddress);
+            // 8. 保存交易记录和更新缓存
+            await Promise.all([
+                this.saveTradeTransaction({
+                    signature: result.signature,
+                    mint: tokenAddress,
+                    owner: keypair.publicKey.toString(),
+                    type: 'sell',
+                    amount: sellAmount.toString(),
+                    tokenAmount: sellAmount.toString(),
+                    tokenDecimals: tokenInfo.decimals || 9,
+                    metadata: {
+                        requestedPercentage: percentage,
+                        actualPercentage: Number(scaledPercentage) / Number(PRECISION),
+                        rawBalance: rawBalance.toString(),
+                        options
+                    }
+                }),
+                this.updateBalanceCache(keypair, tokenAddress)
+            ]);
 
             return {
                 success: true,
                 signature: result.signature,
+                requestedPercentage: percentage * 100, // 转回标准百分比显示
+                actualPercentage: (Number(scaledPercentage) * 100) / Number(PRECISION),
                 amount: sellAmount.toString(),
+                tokenDecimals: tokenInfo.decimals || 9,
                 owner: keypair.publicKey.toString(),
-                mint: tokenAddress,
-                tokenDecimals: tokenInfo.decimals || 9
+                mint: tokenAddress
             };
 
         } catch (error) {
-            logger.error('卖出代币失败:', {
+            logger.error('Token sale failed:', {
                 error: error.message,
-                name: groupType,
-                params: {
-                    groupType,
-                    accountNumber,
-                    tokenAddress,
-                    percentage,
-                    options
-                },
+                tokenAddress,
+                percentage,
                 stack: error.stack
             });
 
-            // 保存失败记录
             if (keypair) {
                 await this.saveFailedTransaction({
                     mint: tokenAddress,
                     owner: keypair.publicKey.toString(),
                     type: 'sell',
-                    error: error  // 修复了这里的 error 引用
+                    error
                 });
             }
 
             throw error;
         }
     }
-
+    _parseTokenBalance(balance) {
+        try {
+            if (typeof balance === 'string' || typeof balance === 'number') {
+                return BigInt(balance.toString());
+            }
+            if (balance?.value?.amount) {
+                return BigInt(balance.value.amount);
+            }
+            throw new Error('Invalid token balance format');
+        } catch (error) {
+            throw new Error(`Failed to parse token balance: ${error.message}`);
+        }
+    }
 // 修复 saveFailedTransaction 方法
     async saveFailedTransaction(params) {
         try {
