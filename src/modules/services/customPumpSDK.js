@@ -1763,7 +1763,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             // 3. Convert parameters to correct types
             const sellerPubkey = this.ensurePublicKey(seller);
-            const mintPubkey = this.ensurePublicKey(mint);
+            const mintPubkey = new PublicKey(mint)
 
             // Convert token amount to BN
             const amountBN = new BN(tokenAmount.toString());
@@ -1877,9 +1877,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const sellInstruction = await this.program.methods
                 .sell(amountBN, minSolOutputBN)
                 .accounts({
+                    // 确保包含 mint 账户
+                    mint: mintPubkey, // 使用正确的 PublicKey
                     global: globalAccount.address,
                     feeRecipient: globalAccount.feeRecipient,
-                    mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
                     associatedBondingCurve: associatedBondingCurveAddress,
                     associatedUser: tokenAccount,
