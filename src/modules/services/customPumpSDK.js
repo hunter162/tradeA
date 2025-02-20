@@ -1752,8 +1752,35 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             });
 
             // 3. 转换参数为正确类型
-            const sellerPubkey = this.ensurePublicKey(seller);
-            const mintPubkey = this.ensurePublicKey(mint);
+            let sellerPubkey;
+            if (seller instanceof PublicKey) {
+                sellerPubkey = seller;
+            } else if (typeof seller === 'string') {
+                sellerPubkey = new PublicKey(seller);
+            } else if (seller?.publicKey instanceof PublicKey) {
+                sellerPubkey = seller.publicKey;
+            } else {
+                throw new Error(`Invalid seller format: ${typeof seller}`);
+            }
+
+            // 明确转换 mint 为 PublicKey
+            let mintPubkey;
+            if (mint instanceof PublicKey) {
+                mintPubkey = mint;
+            } else if (typeof mint === 'string') {
+                mintPubkey = new PublicKey(mint);
+            } else if (mint?.publicKey instanceof PublicKey) {
+                mintPubkey = mint.publicKey;
+            } else {
+                throw new Error(`Invalid mint format: ${typeof mint}`);
+            }
+
+            logger.debug('使用参数:', {
+                seller: sellerPubkey.toString(),
+                mint: mintPubkey.toString(),
+                tokenAmount: tokenAmount.toString(),
+                slippageBasisPoints: slippageBasisPoints?.toString()
+            });
 
             // 转换token数量为BN
             const amountBN = new BN(tokenAmount.toString());
@@ -1953,7 +1980,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     // customPumpSDK.js
     async sell(seller, mint, amount, options = {}) {
         try {
-            // 1. Basic validation
+            // 1. 基本验证
             if (!seller || !seller.publicKey) {
                 throw new Error('Invalid seller wallet');
             }
@@ -1966,9 +1993,21 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             const amountStr = amount.toString();
 
+            // 明确转换 mint 为 PublicKey
+            let mintPublicKey;
+            if (mint instanceof PublicKey) {
+                mintPublicKey = mint;
+            } else if (typeof mint === 'string') {
+                mintPublicKey = new PublicKey(mint);
+            } else if (mint?.publicKey instanceof PublicKey) {
+                mintPublicKey = mint.publicKey;
+            } else {
+                throw new Error(`Invalid mint: ${mint}`);
+            }
+
             logger.info('Starting sell operation:', {
                 seller: seller.publicKey.toString(),
-                mint: mint.toString(),
+                mint: mintPublicKey.toString(),
                 amount: amountStr,
                 options: {
                     ...options,
@@ -1976,10 +2015,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             });
 
-            // 2. Get token account and verify balance
+            // 2. 获取代币账户并验证余额
             const tokenAccount = await this.findAssociatedTokenAddress(
                 seller.publicKey,
-                mint
+                mintPublicKey
             );
 
             const tokenAccountInfo = await this.connection.getAccountInfo(tokenAccount);
@@ -1996,21 +2035,21 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 );
             }
 
-            // 3. Create transaction
+            // 3. 创建交易
             const transaction = new Transaction();
 
-            // 4. Get instructions and signers
+            // 4. 获取指令和签名者
             const { instructions, signers } = await this.getSellInstructions(
                 seller,
-                mint,
+                mintPublicKey,
                 amount,
                 options.slippageBasisPoints || 100n
             );
 
-            // 5. Add all instructions to transaction
+            // 5. 将所有指令添加到交易中
             instructions.forEach(instruction => transaction.add(instruction));
 
-            // 6. Get latest blockhash
+            // 6. 获取最新的 blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -2018,7 +2057,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 7. Simulate transaction
+            // 7. 模拟交易
             logger.info('Simulating transaction...');
             const simulation = await this.connection.simulateTransaction(
                 transaction,
@@ -2036,12 +2075,12 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     error: simulation.value.err,
                     logs: logs,
                     seller: seller.publicKey.toString(),
-                    mint: mint.toString()
+                    mint: mintPublicKey.toString()
                 });
                 throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
             }
 
-            // 8. Send and confirm transaction
+            // 8. 发送并确认交易
             logger.info('Sending transaction...');
             const signature = await sendAndConfirmTransaction(
                 this.connection,
@@ -2065,7 +2104,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 success: true,
                 signature,
                 amount: amountStr,
-                mint: mint.toString(),
+                mint: mintPublicKey.toString(),
                 seller: seller.publicKey.toString(),
                 timestamp: new Date().toISOString()
             };
@@ -2074,7 +2113,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             logger.error('Sell operation failed:', {
                 error: error.message,
                 seller: seller?.publicKey?.toString(),
-                mint: mint?.toString(),
+                mint: mint?.toString?.(),
                 amount: amount?.toString(),
                 stack: error.stack
             });
