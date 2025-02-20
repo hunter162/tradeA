@@ -225,29 +225,28 @@ export class TokenTradeService {
                 )
             ]);
 
-            // 4. 转换代币余额为 BigInt
-            const rawBalance = this._parseTokenBalance(tokenBalance);
+            // 4. 转换代币余额为 BN
+            const rawBalanceBN = new BN(this._parseTokenBalance(tokenBalance).toString());
 
-            // 5. 计算卖出数量 (使用高精度计算)
-            const PRECISION = 1_000_000n; // 使用 6 位精度
-            const scaledPercentage = BigInt(Math.round((percentage/100) * Number(PRECISION)));
-            const sellAmount = (rawBalance * scaledPercentage) / PRECISION;
-            const sellAmountBN = new BN(sellAmount.toString());
+            // 5. 计算卖出数量 (使用 BN)
+            const precisionBN = new BN(1_000_000);
+            const percentageBN = new BN(Math.round((percentage/100) * 1_000_000));
+            const sellAmount = rawBalanceBN.mul(percentageBN).div(precisionBN);
 
             logger.info('Sell amount calculation:', {
-                rawBalance: rawBalance.toString(),
+                rawBalance: rawBalanceBN.toString(),
                 percentage,
-                scaledPercentage: scaledPercentage.toString(),
+                scaledPercentage: percentageBN.toString(),
                 sellAmount: sellAmount.toString(),
                 tokenDecimals: tokenInfo.decimals || 6
             });
 
             // 6. 验证卖出数量
-            if (sellAmount <= 0n) {
+            if (sellAmount.lte(new BN(0))) {
                 throw new Error('Invalid sell amount (zero or negative)');
             }
-            if (sellAmount > rawBalance) {
-                throw new Error(`Insufficient balance. Have: ${rawBalance}, Need: ${sellAmount}`);
+            if (sellAmount.gt(rawBalanceBN)) {
+                throw new Error(`Insufficient balance. Have: ${rawBalanceBN.toString()}, Need: ${sellAmount.toString()}`);
             }
 
             // 7. 准备卖出参数
@@ -261,7 +260,7 @@ export class TokenTradeService {
             // 设置优先费用
             const priorityFees = options.usePriorityFee ? {
                 microLamports: options.priorityFeeSol ?
-                    BigInt(Math.floor(options.priorityFeeSol * 1e6)) : undefined,
+                    new BN(Math.floor(options.priorityFeeSol * 1e6)) : undefined,
                 tipAmountSol: options.priorityFeeSol
             } : undefined;
 
@@ -277,7 +276,7 @@ export class TokenTradeService {
             const result = await sdk.sell(
                 keypair,
                 new PublicKey(cleanTokenAddress),
-                sellAmountBN,
+                sellAmount,
                 slippageBasisPoints,
                 priorityFees,
                 sellOptions
@@ -295,10 +294,10 @@ export class TokenTradeService {
                     tokenDecimals: tokenInfo.decimals || 9,
                     metadata: {
                         requestedPercentage: percentage,
-                        actualPercentage: Number(scaledPercentage) / Number(PRECISION),
-                        rawBalance: rawBalance.toString(),
+                        actualPercentage: Number(percentageBN.toString()) / 1_000_000,
+                        rawBalance: rawBalanceBN.toString(),
                         options: {
-                            slippage: Number(slippageBasisPoints) / 100,
+                            slippage: Number(slippageBasisPoints.toString()) / 100,
                             usePriorityFee: options.usePriorityFee,
                             priorityType: options.priorityType,
                             priorityFeeSol: options.priorityFeeSol
@@ -313,7 +312,7 @@ export class TokenTradeService {
                 signature: result.signature,
                 txId: result.txId,
                 requestedPercentage: percentage,
-                actualPercentage: (Number(scaledPercentage) * 100) / Number(PRECISION),
+                actualPercentage: (Number(percentageBN.toString()) * 100) / 1_000_000,
                 amount: sellAmount.toString(),
                 tokenDecimals: tokenInfo.decimals || 9,
                 owner: keypair.publicKey.toString(),
