@@ -2194,8 +2194,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100, priorityFees, options = {}) {
         try {
             // Convert inputs to BN
-            const tokenAmountBN = toBN(sellTokenAmount);
-            const slippageBN = toBN(slippageBasisPoints);
+            const tokenAmountBN = this.toBN(sellTokenAmount);
+            const slippageBN = this.toBN(slippageBasisPoints);
 
             logger.info('Sell parameters:', {
                 seller: seller.publicKey.toString(),
@@ -2259,21 +2259,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;
         }
     }
-    toBN(value) {
-        if (BN.isBN(value)) {
-            return value;
-        }
-        if (typeof value === 'bigint') {
-            return new BN(value.toString());
-        }
-        if (typeof value === 'number') {
-            return new BN(Math.floor(value).toString());
-        }
-        if (typeof value === 'string') {
-            return new BN(value.replace(/[^\d]/g, ''));
-        }
-        throw new Error(`Cannot convert ${typeof value} to BN`);
-    }
+
     async calculateWithSlippageSell(solOutput, slippageOptions) {
         try {
             // Extract slippage basis points from options
@@ -2358,14 +2344,91 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             signers: []
         };
     }
+    toBN(value, options = { allowNegative: false, decimals: 0 }) {
+        try {
+            // 处理null/undefined
+            if (value === null || value === undefined) {
+                throw new Error('Cannot convert null or undefined to BN');
+            }
+
+            // 已经是BN实例
+            if (BN.isBN(value)) {
+                return value;
+            }
+
+            // 处理BigInt
+            if (typeof value === 'bigint') {
+                return new BN(value.toString());
+            }
+
+            // 处理数字
+            if (typeof value === 'number') {
+                // 检查是否为有效数字
+                if (!Number.isFinite(value)) {
+                    throw new Error('Cannot convert infinite or NaN to BN');
+                }
+
+                // 处理小数
+                if (options.decimals > 0) {
+                    const multiplier = Math.pow(10, options.decimals);
+                    value = Math.floor(value * multiplier);
+                } else {
+                    value = Math.floor(value);
+                }
+
+                // 转换为字符串并移除小数点
+                const valueStr = value.toString().replace('.', '');
+                return new BN(valueStr);
+            }
+
+            // 处理字符串
+            if (typeof value === 'string') {
+                // 移除所有非数字字符(除了负号)
+                const cleanStr = options.allowNegative
+                    ? value.replace(/[^\d-]/g, '')
+                    : value.replace(/[^\d]/g, '');
+
+                if (!cleanStr) {
+                    throw new Error('String contains no valid numeric characters');
+                }
+
+                // 处理负数
+                if (cleanStr.startsWith('-')) {
+                    if (!options.allowNegative) {
+                        throw new Error('Negative values not allowed');
+                    }
+                    return new BN(cleanStr);
+                }
+
+                return new BN(cleanStr);
+            }
+
+            // 处理有toString方法的对象
+            if (value && typeof value.toString === 'function') {
+                const strValue = value.toString();
+
+                // 递归尝试转换字符串值
+                return this.toBN(strValue, options);
+            }
+
+            throw new Error(`Cannot convert ${typeof value} to BN`);
+        } catch (error) {
+            logger.error('BN转换失败:', {
+                value: typeof value === 'bigint' ? value.toString() : value,
+                type: typeof value,
+                error: error.message
+            });
+            throw error;
+        }
+    }
     async calculateSellOutput(mint, tokenAmount) {
         try {
             const bondingCurve = await this.findBondingCurveAddress(mint);
             const account = await this.program.account.bondingCurve.fetch(bondingCurve);
 
-            const currentTokenReserves = toBN(account.virtualTokenReserves);
-            const currentSolReserves = toBN(account.virtualSolReserves);
-            const sellAmount = toBN(tokenAmount);
+            const currentTokenReserves = this.toBN(account.virtualTokenReserves);
+            const currentSolReserves = this.toBN(account.virtualSolReserves);
+            const sellAmount = this.toBN(tokenAmount);
 
             // Ensure not selling more than available
             const newTokenReserves = currentTokenReserves.sub(sellAmount);
@@ -2384,8 +2447,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
     calculateMinimumOutput(amount, slippageBasisPoints) {
         try {
-            const amountBN = toBN(amount);
-            const basisPointsBN = toBN(slippageBasisPoints);
+            const amountBN = this.toBN(amount);
+            const basisPointsBN = this.toBN(slippageBasisPoints);
             const TEN_THOUSAND = new BN(10000);
 
             // Calculate slippage amount
