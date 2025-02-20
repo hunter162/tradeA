@@ -2276,7 +2276,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
     async calculateWithSlippageSell(solOutput, slippageOptions) {
         try {
-            // Extract slippage basis points from options
+            // Extract slippage basis points from options and ensure safe conversion
             let basisPoints;
             if (typeof slippageOptions === 'object') {
                 basisPoints = slippageOptions.slippageBasisPoints || 100;
@@ -2284,26 +2284,24 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 basisPoints = slippageOptions || 100;
             }
 
-            // Convert all values to BigInt for consistent handling
-            const amount = typeof solOutput === 'bigint' ?
-                solOutput :
-                BigInt(solOutput.toString());
-
-            const basisPointsBN = typeof basisPoints === 'bigint' ?
-                basisPoints :
-                BigInt(basisPoints.toString());
+            // Safely convert amounts to BigInt
+            const amount = this._ensureBigInt(solOutput);
+            const basisPointsBN = this._ensureBigInt(basisPoints);
 
             // Calculate with BigInt arithmetic
             const TEN_THOUSAND = BigInt(10000);
             const slippageAmount = (amount * basisPointsBN) / TEN_THOUSAND;
             const finalAmount = amount - slippageAmount;  // Subtract for sell operations
 
-            logger.debug('卖出滑点计算:', {
+            // Log calculations using string conversion for BigInt values
+            const calculationDetails = {
                 originalAmount: amount.toString(),
                 slippageBasisPoints: basisPointsBN.toString(),
                 slippageAmount: slippageAmount.toString(),
                 minimumOutput: finalAmount.toString()
-            });
+            };
+
+            logger.debug('卖出滑点计算:', calculationDetails);
 
             // Ensure the final amount is not negative
             if (finalAmount <= BigInt(0)) {
@@ -2312,11 +2310,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             return finalAmount;
         } catch (error) {
-            logger.error('计算卖出滑点失败:', {
+            // Create a safe error object for logging
+            const errorContext = {
                 solOutput: typeof solOutput === 'bigint' ? solOutput.toString() : solOutput,
                 error: error.message,
-                slippageOptions: JSON.stringify(slippageOptions)
-            });
+                slippageOptions: typeof slippageOptions === 'bigint' ?
+                    slippageOptions.toString() :
+                    JSON.stringify(slippageOptions)
+            };
+
+            logger.error('计算卖出滑点失败:', errorContext);
             throw new Error(`Failed to calculate sell slippage: ${error.message}`);
         }
     }
