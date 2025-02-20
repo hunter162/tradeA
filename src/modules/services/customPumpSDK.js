@@ -1731,11 +1731,11 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mint: mint.toString()
             });
 
-            // 获取需要的账户地址
+            // 1. 获取需要的账户地址
             const bondingCurveAddress = await this.findBondingCurveAddress(mint);
             const globalAccount = await this.getGlobalAccount();
 
-            // 生成关联绑定曲线地址
+            // 2. 生成关联绑定曲线地址
             const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
                 [
                     Buffer.from('associated-bonding-curve'),
@@ -1745,40 +1745,48 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 this.program.programId
             );
 
-            // 使用正确的方法名 initialize
+            // 3. 创建初始化指令
             const initInstruction = await this.program.methods
-                .initialize()
+                .initializeAssociatedAccount()
                 .accounts({
-                    global: globalAccount.address,
                     bondingCurve: bondingCurveAddress,
                     associatedBondingCurve: associatedBondingCurveAddress,
-                    payer: user.publicKey, // 添加支付者
                     user: user.publicKey,
-                    systemProgram: SystemProgram.programId,
-                    eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
-                    program: this.program.programId
+                    payer: user.publicKey,
+                    systemProgram: SystemProgram.programId
                 })
                 .instruction();
 
-            // 创建和发送交易
+            // 4. 创建交易
             const tx = new Transaction();
 
-            // 添加计算预算指令
+            // 5. 添加计算预算指令
             tx.add(
                 ComputeBudgetProgram.setComputeUnitLimit({
                     units: 400000
                 })
             );
 
+            // 6. 添加优先级费用指令
+            tx.add(
+                ComputeBudgetProgram.setComputeUnitPrice({
+                    microLamports: 100000 // 增加优先级以确保交易快速处理
+                })
+            );
+
+            // 7. 添加初始化指令
             tx.add(initInstruction);
 
+            // 8. 获取最新的区块哈希
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
+            // 9. 设置交易参数
             tx.recentBlockhash = blockhash;
             tx.lastValidBlockHeight = lastValidBlockHeight;
             tx.feePayer = user.publicKey;
 
+            // 10. 发送交易
             const signature = await this.sendTransactionWithLogs(
                 this.connection,
                 tx,
@@ -1791,18 +1799,25 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             );
 
-            logger.info('关联绑定曲线初始化成功', {
+            // 11. 日志记录
+            logger.info('关联绑定曲线账户初始化成功', {
                 signature,
-                address: associatedBondingCurveAddress.toString()
+                address: associatedBondingCurveAddress.toString(),
+                bondingCurve: bondingCurveAddress.toString(),
+                user: user.publicKey.toString()
             });
 
+            // 12. 返回结果
             return {
                 success: true,
                 signature,
-                address: associatedBondingCurveAddress.toString()
+                address: associatedBondingCurveAddress.toString(),
+                bondingCurveAddress: bondingCurveAddress.toString(),
+                timestamp: new Date().toISOString()
             };
+
         } catch (error) {
-            logger.error('初始化关联绑定曲线失败', {
+            logger.error('初始化关联绑定曲线账户失败', {
                 error: error.message,
                 user: user?.publicKey?.toString(),
                 mint: mint?.toString(),
