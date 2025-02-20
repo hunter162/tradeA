@@ -1995,9 +1995,11 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             // 修改: 如果是卖出全部余额，则卖出95%以确保成功
             if (amountBN.eq(availableAmount) || options.percentage === 100) {
-                const adjustedAmount = new BN(
-                    Math.floor(BigInt(tokenBalance.value.amount) * 95n / 100n).toString()
-                );
+                // 使用 BigInt 操作，避免 Math.floor 转换错误
+                const tokenBalanceBigInt = BigInt(tokenBalance.value.amount);
+                const adjustedAmountBigInt = (tokenBalanceBigInt * 95n) / 100n;
+                const adjustedAmount = new BN(adjustedAmountBigInt.toString());
+
                 logger.info('调整卖出数量为总额的95%:', {
                     originalAmount: amountBN.toString(),
                     adjustedAmount: adjustedAmount.toString()
