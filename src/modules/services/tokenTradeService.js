@@ -2,7 +2,7 @@ import { logger } from '../utils/index.js';
 import db from '../db/index.js';
 import {Keypair, PublicKey} from '@solana/web3.js';
 import {CustomPumpSDK} from "./customPumpSDK.js";
-import {AnchorProvider, Wallet} from "@coral-xyz/anchor";
+import {AnchorProvider, BN, Wallet} from "@coral-xyz/anchor";
 
 export class TokenTradeService {
     constructor(solanaService, redisService) {
