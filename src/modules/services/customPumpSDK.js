@@ -1733,19 +1733,23 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     }
     async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
         try {
-            // 1. 参数验证
+            // 1. 输入验证
             if (!seller) throw new Error('Seller is required');
             if (!mint) throw new Error('Mint is required');
             if (!tokenAmount) throw new Error('Token amount is required');
 
             // 2. 初始化provider如果需要
-            await this.initializeProvider(seller);
+            if (!this.program) {
+                await this.initializeProvider(seller);
+            }
 
             if (!this.provider || !this.program) {
                 throw new Error('Provider initialization failed');
             }
 
-            logger.info('Program IDL:', this.program.idl);
+            logger.info('Program IDL:', {
+                instructions: this.program.idl.instructions.map(ix => ix.name)
+            });
 
             // 3. 转换参数为正确类型
             const sellerPubkey = this.ensurePublicKey(seller);
@@ -1788,23 +1792,81 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 slippageBN
             );
 
-            // 6. 创建sell指令
-            logger.info('Creating sell instruction:', {
+            const minSolOutputBN = BN.isBN(minSolOutput) ?
+                minSolOutput :
+                new BN(minSolOutput.toString());
+
+            // 6. 创建关联绑定曲线账户如果需要
+            const instructions = [];
+
+            // 添加计算预算指令
+            instructions.push(
+                ComputeBudgetProgram.setComputeUnitLimit({
+                    units: 400000
+                })
+            );
+
+            // 检查关联绑定曲线账户是否存在
+            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('associated-bonding-curve'),
+                    sellerPubkey.toBuffer(),
+                    mintPubkey.toBuffer()
+                ],
+                this.program.programId
+            );
+
+            const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
+            if (!accountInfo) {
+                logger.info('Creating associated bonding curve account:', {
+                    address: associatedBondingCurveAddress.toString(),
+                    mint: mintPubkey.toString(),
+                    user: sellerPubkey.toString()
+                });
+
+                // 获取metadata地址
+                const metadataAddress = await this.findMetadataAddress(mintPubkey);
+
+                // 创建关联账户指令
+                const createIx = await this.program.methods
+                    .create()
+                    .accounts({
+                        mint: mintPubkey,
+                        mintAuthority: sellerPubkey,
+                        bondingCurve: bondingCurveAddress,
+                        associatedBondingCurve: associatedBondingCurveAddress,
+                        global: globalAccount.address,
+                        mplTokenMetadata: new PublicKey(TOKEN_METADATA_PROGRAM_ID),
+                        metadata: metadataAddress,
+                        user: sellerPubkey,
+                        systemProgram: SystemProgram.programId,
+                        tokenProgram: TOKEN_PROGRAM_ID,
+                        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                        rent: SYSVAR_RENT_PUBKEY,
+                        eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
+                        program: this.program.programId
+                    })
+                    .instruction();
+
+                instructions.push(createIx);
+            }
+
+            // 7. 创建sell指令
+            logger.info('Building sell instruction:', {
                 seller: sellerPubkey.toString(),
                 mint: mintPubkey.toString(),
                 amount: amountBN.toString(),
-                minSolOutput: minSolOutput.toString()
+                minSolOutput: minSolOutputBN.toString()
             });
 
-            // 确保账户顺序与IDL中定义的一致
             const sellInstruction = await this.program.methods
-                .sell(amountBN, minSolOutput)
+                .sell(amountBN, minSolOutputBN)
                 .accounts({
                     global: globalAccount.address,
                     feeRecipient: globalAccount.feeRecipient,
-                    mint: mintPubkey,  // 确保包含mint账户
+                    mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: associatedBondingCurve,
+                    associatedBondingCurve: associatedUser,
                     associatedUser: associatedUser,
                     user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
@@ -1815,25 +1877,16 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 })
                 .instruction();
 
-            // 可选：添加计算预算指令
-            const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
-                units: 400000
+            instructions.push(sellInstruction);
+
+            logger.debug('Sell instructions created successfully:', {
+                instructionCount: instructions.length,
+                hasAssociatedAccount: !!accountInfo,
+                seller: sellerPubkey.toString(),
+                mint: mintPubkey.toString()
             });
 
-            logger.debug('Sell instruction created successfully:', {
-                accounts: {
-                    mint: mintPubkey.toString(),
-                    bondingCurve: bondingCurveAddress.toString(),
-                    associatedBondingCurve: associatedBondingCurve.toString(),
-                    associatedUser: associatedUser.toString(),
-                    user: sellerPubkey.toString()
-                }
-            });
-
-            return {
-                instructions: [computeBudgetIx, sellInstruction],
-                signers: []
-            };
+            return { instructions, signers: [] };
 
         } catch (error) {
             logger.error('Failed to create sell instructions:', {
