@@ -1747,6 +1747,20 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Provider initialization failed');
             }
 
+            // Log IDL information for debugging
+            logger.info('Program IDL:', {
+                version: this.program.idl.version,
+                name: this.program.idl.name,
+                instructions: this.program.idl.instructions.map(ix => ({
+                    name: ix.name,
+                    accounts: ix.accounts.map(acc => ({
+                        name: acc.name,
+                        isMut: acc.isMut,
+                        isSigner: acc.isSigner
+                    }))
+                }))
+            });
+
             // 3. Convert parameters to correct types
             const sellerPubkey = this.ensurePublicKey(seller);
             const mintPubkey = this.ensurePublicKey(mint);
@@ -1811,7 +1825,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
 
             if (!accountInfo) {
-                // Try to create associated bonding curve account using 'create' method
                 logger.info('Creating associated bonding curve account:', {
                     address: associatedBondingCurveAddress.toString(),
                     user: sellerPubkey.toString(),
@@ -1821,7 +1834,17 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 // Get metadata address
                 const metadataAddress = await this.findMetadataAddress(mintPubkey);
 
-                const remainingAccounts = [];
+                // Find create instruction in IDL
+                const createIxAccounts = this.program.idl.instructions
+                    .find(ix => ix.name === 'create')?.accounts || [];
+
+                logger.info('Create instruction accounts from IDL:', {
+                    accounts: createIxAccounts.map(acc => ({
+                        name: acc.name,
+                        isMut: acc.isMut,
+                        isSigner: acc.isSigner
+                    }))
+                });
 
                 const createIx = await this.program.methods
                     .create()
@@ -1829,15 +1852,14 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                         user: sellerPubkey,
                         systemProgram: SystemProgram.programId,
                         tokenProgram: TOKEN_PROGRAM_ID,
-                        mintAccount: mintPubkey,  // Changed from 'mint' to 'mintAccount'
-                        metadataAccount: metadataAddress,  // Changed from 'metadata' to 'metadataAccount'
-                        globalState: globalAccount.address,  // Changed from 'global' to 'globalState'
+                        mint: mintPubkey,
+                        metadata: metadataAddress,
+                        global: globalAccount.address,
                         bondingCurve: bondingCurveAddress,
                         associatedBondingCurve: associatedBondingCurveAddress,
-                        associatedTokenAccount: tokenAccount,  // Changed from 'associatedUser' to 'associatedTokenAccount'
+                        associatedUser: tokenAccount,
                         eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1')
                     })
-                    .remainingAccounts(remainingAccounts)
                     .instruction();
 
                 instructions.push(createIx);
@@ -1879,7 +1901,6 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 mint: mintPubkey.toString()
             });
 
-            // Return instructions, no additional signers needed since we're using a PDA
             return { instructions, signers: [] };
 
         } catch (error) {
