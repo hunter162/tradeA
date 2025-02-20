@@ -219,7 +219,7 @@ export class TokenTradeService {
 
             // 5. 计算卖出数量 (使用高精度计算)
             const PRECISION = 1_000_000n; // 使用 6 位精度
-            const scaledPercentage = BigInt(Math.round(percentage * Number(PRECISION)));
+            const scaledPercentage = BigInt(Math.round((percentage/100) * Number(PRECISION)));
             const sellAmount = (rawBalance * scaledPercentage) / PRECISION;
 
             logger.info('Sell amount calculation:', {
