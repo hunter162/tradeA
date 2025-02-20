@@ -2306,43 +2306,69 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw new Error(`Failed to calculate sell slippage: ${error.message}`);
         }
     }
+    // 更新 buildSellTransaction 方法
     async buildSellTransaction(seller, mint, amount, slippage, options = {}) {
-        const transaction = new Transaction();
+        try {
+            const transaction = new Transaction();
 
-        // Get accounts
-        const bondingCurve = await this.findBondingCurveAddress(mint);
-        const tokenAccount = await this.findAssociatedTokenAddress(seller, mint);
+            // Get accounts
+            const globalAccount = await this.getGlobalAccount();
+            const bondingCurve = await this.findBondingCurveAddress(mint);
+            const tokenAccount = await this.findAssociatedTokenAddress(seller, mint);
 
-        // Calculate minimum output
-        const calculatedOutput = await this.calculateSellOutput(mint, amount);
-        const minOutput = this.calculateMinimumOutput(calculatedOutput, slippage);
+            // Calculate minimum output
+            const calculatedOutput = await this.calculateSellOutput(mint, amount);
+            const minOutput = this.calculateMinimumOutput(calculatedOutput, slippage);
 
-        // Add compute budget instruction
-        transaction.add(
-            ComputeBudgetProgram.setComputeUnitLimit({
-                units: 400000
-            })
-        );
+            // Add compute budget instruction
+            transaction.add(
+                ComputeBudgetProgram.setComputeUnitLimit({
+                    units: 400000
+                })
+            );
 
-        // Build sell instruction
-        const sellInstruction = await this.program.methods
-            .sell(amount, minOutput)
-            .accounts({
-                user: seller,
-                mint: mint,
-                bondingCurve: bondingCurve,
-                userToken: tokenAccount,
-                systemProgram: SystemProgram.programId,
-                tokenProgram: TOKEN_PROGRAM_ID
-            })
-            .instruction();
+            // Build sell instruction
+            const sellInstruction = await this.program.methods
+                .sell(amount, minOutput)
+                .accounts({
+                    global: globalAccount.address,                  // 添加global账户
+                    feeRecipient: globalAccount.feeRecipient,      // 添加feeRecipient账户
+                    mint: mint,
+                    bondingCurve: bondingCurve,
+                    associatedBondingCurve: await this.findAssociatedBondingCurveAddress(seller, mint),
+                    associatedUser: tokenAccount,
+                    user: seller,
+                    systemProgram: SystemProgram.programId,
+                    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                    eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
+                    program: this.program.programId
+                })
+                .instruction();
 
-        transaction.add(sellInstruction);
+            transaction.add(sellInstruction);
 
-        return {
-            transaction,
-            signers: []
-        };
+            logger.info('卖出交易构建成功:', {
+                seller: seller.toString(),
+                mint: mint.toString(),
+                amount: amount.toString(),
+                minOutput: minOutput.toString(),
+                feeRecipient: globalAccount.feeRecipient.toString()
+            });
+
+            return {
+                transaction,
+                signers: []
+            };
+        } catch (error) {
+            logger.error('构建卖出交易失败:', {
+                error: error.message,
+                seller: seller.toString(),
+                mint: mint.toString(),
+                stack: error.stack
+            });
+            throw error;
+        }
     }
     toBN(value, options = { allowNegative: false, decimals: 0 }) {
         try {
