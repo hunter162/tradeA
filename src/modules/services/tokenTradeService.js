@@ -232,7 +232,7 @@ export class TokenTradeService {
             const PRECISION = 1_000_000n; // 使用 6 位精度
             const scaledPercentage = BigInt(Math.round((percentage/100) * Number(PRECISION)));
             const sellAmount = (rawBalance * scaledPercentage) / PRECISION;
-
+            const sellAmount1 = new BN(sellAmount.toString());
             logger.info('Sell amount calculation:', {
                 rawBalance: rawBalance.toString(),
                 percentage,
@@ -276,7 +276,7 @@ export class TokenTradeService {
             const result = await sdk.sell(
                 keypair,
                 new PublicKey(cleanTokenAddress),
-                sellAmount,
+                sellAmount1,
                 slippageBasisPoints,
                 priorityFees,
                 sellOptions
