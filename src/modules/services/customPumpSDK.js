@@ -2191,70 +2191,65 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
     // customPumpSDK.js (sell 相关部分)
     // In CustomPumpSDK class
-    async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100, priorityFees, options = {}) {
+    async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
         try {
-            // Convert inputs to BN
-            const tokenAmountBN = this.toBN(sellTokenAmount);
-            const slippageBN = this.toBN(slippageBasisPoints);
-
-            logger.info('Sell parameters:', {
-                seller: seller.publicKey.toString(),
-                mint: mint.toString(),
-                amount: tokenAmountBN.toString(),
-                slippage: slippageBN.toString()
-            });
-
-            // Get sell instructions
-            const { transaction, signers } = await this.buildSellTransaction(
-                seller.publicKey,
-                mint,
-                tokenAmountBN,
-                slippageBN,
-                options
-            );
-
-            // Add priority fees if specified
-            if (priorityFees?.microLamports) {
-                transaction.add(
-                    ComputeBudgetProgram.setComputeUnitPrice({
-                        microLamports: priorityFees.microLamports
-                    })
+            return await this.withRetry(async () => {
+                // 使用 SDK 的卖出指令方法
+                let sellTx = await super.getSellInstructionsByTokenAmount(
+                    seller.publicKey,
+                    mint,
+                    this.toBN(sellTokenAmount), // 确保转换为 BN 类型
+                    this.toBN(slippageBasisPoints), // 确保转换为 BN 类型
+                    'confirmed'
                 );
-            }
 
-            // Get latest blockhash
-            const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
-
-            transaction.recentBlockhash = blockhash;
-            transaction.lastValidBlockHeight = lastValidBlockHeight;
-            transaction.feePayer = seller.publicKey;
-
-            // Send and confirm transaction
-            const signature = await sendAndConfirmTransaction(
-                this.connection,
-                transaction,
-                [seller, ...signers],
-                {
-                    skipPreflight: false,
-                    preflightCommitment: 'confirmed',
-                    commitment: 'confirmed'
+                // 添加优先费用指令（如果需要）
+                if (priorityFees?.microLamports) {
+                    sellTx.add(
+                        ComputeBudgetProgram.setComputeUnitPrice({
+                            microLamports: priorityFees.microLamports
+                        })
+                    );
                 }
-            );
 
-            return {
-                signature,
-                status: 'success',
-                amount: tokenAmountBN.toString(),
-                mint: mint.toString(),
-                seller: seller.publicKey.toString()
-            };
+                // 获取最新的区块哈希
+                const { blockhash, lastValidBlockHeight } =
+                    await this.connection.getLatestBlockhash('confirmed');
 
+                sellTx.recentBlockhash = blockhash;
+                sellTx.lastValidBlockHeight = lastValidBlockHeight;
+                sellTx.feePayer = seller.publicKey;
+
+                // 发送交易
+                const signature = await sendAndConfirmTransaction(
+                    this.connection,
+                    sellTx,
+                    [seller],
+                    {
+                        skipPreflight: false,
+                        preflightCommitment: 'processed',
+                        commitment: 'confirmed',
+                        maxRetries: 3
+                    }
+                );
+
+                return {
+                    signature,
+                    txId: signature,
+                    amount: sellTokenAmount.toString(),
+                    mint: mint.toString(),
+                    owner: seller.publicKey.toString(),
+                    timestamp: new Date().toISOString(),
+                    endpoint: this.connection.rpcEndpoint
+                };
+            });
         } catch (error) {
-            logger.error('Sell transaction failed:', {
+            logger.error('❌ 卖出代币失败', {
                 error: error.message,
                 mint: mint.toString(),
-                amount: sellTokenAmount.toString()
+                amount: sellTokenAmount.toString(),
+                time: new Date().toISOString(),
+                endpoint: this.connection.rpcEndpoint
             });
             throw error;
         }
