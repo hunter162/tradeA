@@ -1733,168 +1733,67 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     }
     async getSellInstructions(seller, mint, tokenAmount, slippageBasisPoints) {
         try {
-            // 1. 输入验证
+            // 1. Input validation
             if (!seller) throw new Error('Seller is required');
             if (!mint) throw new Error('Mint is required');
             if (!tokenAmount) throw new Error('Token amount is required');
 
-            // 2. 初始化provider如果需要
+            // 2. Initialize provider if needed
             if (!this.program) {
                 await this.initializeProvider(seller);
             }
 
-            if (!this.provider || !this.program) {
-                throw new Error('Provider initialization failed');
-            }
+            // 3. Convert parameters to correct types
+            const sellerPubkey = this.ensurePublicKey(seller);
+            const mintPubkey = this.ensurePublicKey(mint);
 
-            logger.info('Program IDL:', {
-                instructions: this.program.idl.instructions.map(ix => ix.name)
-            });
-
-            // 3. 转换参数为正确类型
-            let sellerPubkey;
-            if (seller instanceof PublicKey) {
-                sellerPubkey = seller;
-            } else if (typeof seller === 'string') {
-                sellerPubkey = new PublicKey(seller);
-            } else if (seller?.publicKey instanceof PublicKey) {
-                sellerPubkey = seller.publicKey;
-            } else {
-                throw new Error(`Invalid seller format: ${typeof seller}`);
-            }
-
-            // 明确转换 mint 为 PublicKey
-            let mintPubkey;
-            if (mint instanceof PublicKey) {
-                mintPubkey = mint;
-            } else if (typeof mint === 'string') {
-                mintPubkey = new PublicKey(mint);
-            } else if (mint?.publicKey instanceof PublicKey) {
-                mintPubkey = mint.publicKey;
-            } else {
-                throw new Error(`Invalid mint format: ${typeof mint}`);
-            }
-
-            logger.debug('使用参数:', {
+            logger.debug('Using parameters:', {
                 seller: sellerPubkey.toString(),
                 mint: mintPubkey.toString(),
                 tokenAmount: tokenAmount.toString(),
                 slippageBasisPoints: slippageBasisPoints?.toString()
             });
 
-            // 转换token数量为BN
-            const amountBN = new BN(tokenAmount.toString());
-            const slippageBN = new BN(slippageBasisPoints?.toString() || '100');
-
-            // 4. 获取账户
+            // 4. Get global account
             const globalAccount = await this.getGlobalAccount();
-            if (!globalAccount?.address) {
-                throw new Error('Global account not found');
-            }
 
+            // 5. Get necessary PDAs and accounts
             const bondingCurveAddress = await this.findBondingCurveAddress(mintPubkey);
-            if (!bondingCurveAddress) {
-                throw new Error('Bonding curve address not found');
-            }
-
-            const associatedBondingCurve = await getAssociatedTokenAddress(
-                bondingCurveAddress,
-                mintPubkey
-            );
-
-            const associatedUser = await this.findAssociatedTokenAddress(
+            const associatedTokenAccount = await this.findAssociatedTokenAddress(
                 sellerPubkey,
                 mintPubkey
             );
 
-            // 5. 计算最小SOL输出
-            const calculatedSolOutput = await this.calculateSellSolOutput(mintPubkey, amountBN);
-            const solOutputBN = BN.isBN(calculatedSolOutput) ?
-                calculatedSolOutput :
-                new BN(calculatedSolOutput.toString());
-
-            // 计算带滑点的最小输出
+            // 6. Calculate minimum SOL output with slippage
+            const calculatedSolOutput = await this.calculateSellSolOutput(mintPubkey, tokenAmount);
             const minSolOutput = await this.calculateWithSlippageSell(
-                solOutputBN,
-                slippageBN
+                calculatedSolOutput,
+                slippageBasisPoints || 100n
             );
 
-            const minSolOutputBN = BN.isBN(minSolOutput) ?
-                minSolOutput :
-                new BN(minSolOutput.toString());
-
-            // 6. 创建关联绑定曲线账户如果需要
+            // 7. Build instructions array
             const instructions = [];
 
-            // 添加计算预算指令
+            // Add compute budget instruction
             instructions.push(
                 ComputeBudgetProgram.setComputeUnitLimit({
                     units: 400000
                 })
             );
 
-            // 检查关联绑定曲线账户是否存在
-            const [associatedBondingCurveAddress] = await PublicKey.findProgramAddress(
-                [
-                    Buffer.from('associated-bonding-curve'),
-                    sellerPubkey.toBuffer(),
-                    mintPubkey.toBuffer()
-                ],
-                this.program.programId
-            );
-
-            const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
-            if (!accountInfo) {
-                logger.info('Creating associated bonding curve account:', {
-                    address: associatedBondingCurveAddress.toString(),
-                    mint: mintPubkey.toString(),
-                    user: sellerPubkey.toString()
-                });
-
-                // 获取metadata地址
-                const metadataAddress = await this.findMetadataAddress(mintPubkey);
-
-                // 创建关联账户指令
-                const createIx = await this.program.methods
-                    .create()
-                    .accounts({
-                        mint: mintPubkey,
-                        mintAuthority: sellerPubkey,
-                        bondingCurve: bondingCurveAddress,
-                        associatedBondingCurve: associatedBondingCurveAddress,
-                        global: globalAccount.address,
-                        mplTokenMetadata: new PublicKey(TOKEN_METADATA_PROGRAM_ID),
-                        metadata: metadataAddress,
-                        user: sellerPubkey,
-                        systemProgram: SystemProgram.programId,
-                        tokenProgram: TOKEN_PROGRAM_ID,
-                        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-                        rent: SYSVAR_RENT_PUBKEY,
-                        eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
-                        program: this.program.programId
-                    })
-                    .instruction();
-
-                instructions.push(createIx);
-            }
-
-            // 7. 创建sell指令
-            logger.info('Building sell instruction:', {
-                seller: sellerPubkey.toString(),
-                mint: mintPubkey.toString(),
-                amount: amountBN.toString(),
-                minSolOutput: minSolOutputBN.toString()
-            });
-
+            // 8. Create sell instruction
             const sellInstruction = await this.program.methods
-                .sell(amountBN, minSolOutputBN)
+                .sell(
+                    new BN(tokenAmount.toString()),
+                    new BN(minSolOutput.toString())
+                )
                 .accounts({
                     global: globalAccount.address,
                     feeRecipient: globalAccount.feeRecipient,
                     mint: mintPubkey,
                     bondingCurve: bondingCurveAddress,
-                    associatedBondingCurve: associatedUser,
-                    associatedUser: associatedUser,
+                    associatedBondingCurve: associatedTokenAccount,
+                    associatedUser: associatedTokenAccount,
                     user: sellerPubkey,
                     systemProgram: SystemProgram.programId,
                     associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -1906,14 +1805,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
 
             instructions.push(sellInstruction);
 
-            logger.debug('Sell instructions created successfully:', {
-                instructionCount: instructions.length,
-                hasAssociatedAccount: !!accountInfo,
-                seller: sellerPubkey.toString(),
-                mint: mintPubkey.toString()
-            });
-
-            return { instructions, signers: [] };
+            return {
+                instructions,
+                signers: []
+            };
 
         } catch (error) {
             logger.error('Failed to create sell instructions:', {
@@ -1980,7 +1875,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
     // customPumpSDK.js
     async sell(seller, mint, amount, options = {}) {
         try {
-            // 1. 基本验证
+            // 1. Basic validation
             if (!seller || !seller.publicKey) {
                 throw new Error('Invalid seller wallet');
             }
@@ -1991,65 +1886,49 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 throw new Error('Invalid amount');
             }
 
-            const amountStr = amount.toString();
-
-            // 明确转换 mint 为 PublicKey
-            let mintPublicKey;
-            if (mint instanceof PublicKey) {
-                mintPublicKey = mint;
-            } else if (typeof mint === 'string') {
-                mintPublicKey = new PublicKey(mint);
-            } else if (mint?.publicKey instanceof PublicKey) {
-                mintPublicKey = mint.publicKey;
-            } else {
-                throw new Error(`Invalid mint: ${mint}`);
-            }
+            const mintPubkey = this.ensurePublicKey(mint);
+            const amountBN = new BN(amount.toString());
 
             logger.info('Starting sell operation:', {
                 seller: seller.publicKey.toString(),
-                mint: mintPublicKey.toString(),
-                amount: amountStr,
+                mint: mintPubkey.toString(),
+                amount: amountBN.toString(),
                 options: {
                     ...options,
                     slippageBasisPoints: options.slippageBasisPoints?.toString()
                 }
             });
 
-            // 2. 获取代币账户并验证余额
+            // 2. Check token balance
             const tokenAccount = await this.findAssociatedTokenAddress(
                 seller.publicKey,
-                mintPublicKey
+                mintPubkey
             );
 
-            const tokenAccountInfo = await this.connection.getAccountInfo(tokenAccount);
-            if (!tokenAccountInfo) {
-                throw new Error(`Token account ${tokenAccount.toString()} does not exist`);
-            }
-
             const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
-            const availableAmount = BigInt(tokenBalance.value.amount);
+            const availableAmount = new BN(tokenBalance.value.amount);
 
-            if (amount > availableAmount) {
+            if (amountBN.gt(availableAmount)) {
                 throw new Error(
-                    `Insufficient token balance. Available: ${availableAmount.toString()}, Trying to sell: ${amountStr}`
+                    `Insufficient token balance. Available: ${availableAmount.toString()}, Trying to sell: ${amountBN.toString()}`
                 );
             }
 
-            // 3. 创建交易
+            // 3. Create transaction
             const transaction = new Transaction();
 
-            // 4. 获取指令和签名者 - 关键修改
+            // 4. Get instructions
             const { instructions, signers } = await this.getSellInstructions(
-                seller.publicKey, // 传递 publicKey 而不是整个 seller 对象
-                mintPublicKey,
-                amount,
+                seller.publicKey,
+                mintPubkey,
+                amountBN,
                 options.slippageBasisPoints || 100n
             );
 
-            // 5. 将所有指令添加到交易中
+            // 5. Add all instructions to transaction
             instructions.forEach(instruction => transaction.add(instruction));
 
-            // 6. 获取最新的 blockhash
+            // 6. Get latest blockhash
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -2057,8 +1936,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = seller.publicKey;
 
-            // 7. 模拟交易
-            logger.info('Simulating transaction...');
+            // 7. Simulate transaction
             const simulation = await this.connection.simulateTransaction(
                 transaction,
                 [seller, ...signers],
@@ -2070,18 +1948,10 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             );
 
             if (simulation.value.err) {
-                const logs = simulation.value.logs || [];
-                logger.error('Transaction simulation failed:', {
-                    error: simulation.value.err,
-                    logs: logs,
-                    seller: seller.publicKey.toString(),
-                    mint: mintPublicKey.toString()
-                });
                 throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
             }
 
-            // 8. 发送并确认交易
-            logger.info('Sending transaction...');
+            // 8. Send and confirm transaction
             const signature = await sendAndConfirmTransaction(
                 this.connection,
                 transaction,
@@ -2094,17 +1964,11 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 }
             );
 
-            logger.info('Sell transaction successful:', {
-                signature,
-                seller: seller.publicKey.toString(),
-                amount: amountStr
-            });
-
             return {
                 success: true,
                 signature,
-                amount: amountStr,
-                mint: mintPublicKey.toString(),
+                amount: amountBN.toString(),
+                mint: mintPubkey.toString(),
                 seller: seller.publicKey.toString(),
                 timestamp: new Date().toISOString()
             };
