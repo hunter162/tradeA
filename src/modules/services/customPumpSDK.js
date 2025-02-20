@@ -1787,10 +1787,14 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 minSolOutput :
                 new BN(minSolOutput.toString());
 
-            // 6. Find associated bonding curve address
-            const associatedBondingCurveAddress = await this.findAssociatedBondingCurveAddress(
-                sellerPubkey,
-                mintPubkey
+            // 6. Find associated bonding curve address and bump
+            const [associatedBondingCurveAddress, bump] = await PublicKey.findProgramAddress(
+                [
+                    Buffer.from('associated-bonding-curve'),
+                    sellerPubkey.toBuffer(),
+                    mintPubkey.toBuffer()
+                ],
+                this.program.programId
             );
 
             // Create an array for instructions
@@ -1813,19 +1817,20 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     mint: mintPubkey.toString()
                 });
 
-                // Add create_associated_bonding_curve instruction
-                const createAssociatedBondingCurveIx = await this.program.methods
-                    .create_associated_bonding_curve()
-                    .accounts({
-                        bondingCurve: bondingCurveAddress,
-                        associatedBondingCurve: associatedBondingCurveAddress,
-                        user: sellerPubkey,
-                        mint: mintPubkey,
-                        systemProgram: SystemProgram.programId
-                    })
-                    .instruction();
+                // Calculate space needed for the account
+                const space = 128; // Size for the associated bonding curve account
+                const rent = await this.connection.getMinimumBalanceForRentExemption(space);
 
-                instructions.push(createAssociatedBondingCurveIx);
+                // Create account instruction
+                const createAccountIx = SystemProgram.createAccount({
+                    fromPubkey: sellerPubkey,
+                    newAccountPubkey: associatedBondingCurveAddress,
+                    lamports: rent,
+                    space: space,
+                    programId: this.program.programId
+                });
+
+                instructions.push(createAccountIx);
             }
 
             // Add sell instruction
