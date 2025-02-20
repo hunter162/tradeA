@@ -211,8 +211,15 @@ export class TokenTradeService {
                 tokenAddress
             );
 
-            // 3. 验证余额响应
-            if (!tokenBalanceResponse?.value?.amount) {
+            // 3. 验证和转换余额响应
+            let rawBalance;
+            if (typeof tokenBalanceResponse === 'string' || typeof tokenBalanceResponse === 'number') {
+                // 如果是直接的数值，直接使用
+                rawBalance = BigInt(tokenBalanceResponse.toString());
+            } else if (tokenBalanceResponse?.value?.amount) {
+                // 如果是标准的 token 账户余额响应格式
+                rawBalance = BigInt(tokenBalanceResponse.value.amount);
+            } else {
                 logger.error('无效的代币余额响应:', {
                     response: tokenBalanceResponse,
                     tokenAddress,
@@ -221,11 +228,16 @@ export class TokenTradeService {
                 throw new Error('Invalid token balance response');
             }
 
+            logger.info('代币余额检查:', {
+                rawBalance: rawBalance.toString(),
+                tokenAddress,
+                wallet: keypair.publicKey.toString()
+            });
+
             // 4. 获取代币信息
             const tokenInfo = await this.getTokenInfo(tokenAddress);
 
             // 5. 计算卖出数量
-            const rawBalance = BigInt(tokenBalanceResponse.value.amount);
             const percentageBN = BigInt(Math.floor(percentage * 100));
             const sellAmount = (rawBalance * percentageBN) / BigInt(10000);
 
@@ -234,7 +246,7 @@ export class TokenTradeService {
                 rawBalance: rawBalance.toString(),
                 percentage,
                 sellAmount: sellAmount.toString(),
-                decimals: tokenBalanceResponse.value.decimals
+                decimals: tokenInfo.decimals || 9  // 使用代币信息中的小数位数，默认为 9
             });
 
             // 6. 验证数量
@@ -260,7 +272,7 @@ export class TokenTradeService {
                 {
                     ...options,
                     slippageBasisPoints: options.slippage ? BigInt(options.slippage * 100) : 100n,
-                    decimals: tokenInfo.decimals
+                    decimals: tokenInfo.decimals || 9
                 }
             );
 
@@ -277,7 +289,7 @@ export class TokenTradeService {
                 type: 'sell',
                 amount: sellAmount.toString(),
                 tokenAmount: sellAmount.toString(),
-                tokenDecimals: tokenInfo.decimals,
+                tokenDecimals: tokenInfo.decimals || 9,
                 metadata: {
                     percentage,
                     options,
@@ -294,7 +306,7 @@ export class TokenTradeService {
                 amount: sellAmount.toString(),
                 owner: keypair.publicKey.toString(),
                 mint: tokenAddress,
-                tokenDecimals: tokenInfo.decimals
+                tokenDecimals: tokenInfo.decimals || 9
             };
 
         } catch (error) {
@@ -317,11 +329,52 @@ export class TokenTradeService {
                     mint: tokenAddress,
                     owner: keypair.publicKey.toString(),
                     type: 'sell',
-                    error
+                    error: error  // 修复了这里的 error 引用
                 });
             }
 
             throw error;
+        }
+    }
+
+// 修复 saveFailedTransaction 方法
+    async saveFailedTransaction(params) {
+        try {
+            const {
+                signature,
+                mint,
+                owner,
+                type,
+                amount,
+                error
+            } = params;
+
+            await db.models.Transaction.create({
+                signature,
+                mint,
+                owner,
+                type,
+                amount: amount?.toString(),
+                status: 'failed',
+                error: error.message,
+                raw: {
+                    error: {
+                        message: error.message,
+                        stack: error.stack
+                    }
+                }
+            });
+
+            logger.info('失败交易已记录:', {
+                signature,
+                type,
+                error: error.message
+            });
+        } catch (dbError) {
+            logger.error('保存失败交易记录时出错:', {
+                error: dbError.message,
+                originalError: params.error?.message
+            });
         }
     }
 
