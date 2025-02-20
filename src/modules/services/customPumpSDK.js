@@ -1769,6 +1769,13 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const tx = new Transaction();
             tx.add(initInstruction);
 
+            // Add compute budget instruction to ensure enough compute units
+            tx.add(
+                ComputeBudgetProgram.setComputeUnitLimit({
+                    units: 400000
+                })
+            );
+
             const { blockhash, lastValidBlockHeight } =
                 await this.connection.getLatestBlockhash('confirmed');
 
@@ -1802,7 +1809,8 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             logger.error('Failed to initialize associated bonding curve', {
                 error: error.message,
                 user: user?.publicKey?.toString(),
-                mint: mint?.toString()
+                mint: mint?.toString(),
+                stack: error.stack
             });
             throw error;
         }
