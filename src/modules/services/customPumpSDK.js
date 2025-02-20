@@ -2095,7 +2095,99 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             throw error;
         }
     }
+    async calculateSellSolOutput(mint, tokenAmount) {
+        try {
+            const bondingCurveAddress = await this.findBondingCurveAddress(mint);
+            const bondingCurveAccount = await this.program.account.bondingCurve.fetch(bondingCurveAddress);
 
+            if (!bondingCurveAccount) {
+                throw new Error('Bonding curve account not found');
+            }
+
+            // 添加输入验证日志
+            logger.debug('计算卖出 SOL 输出:', {
+                input: {
+                    mint: mint.toString(),
+                    tokenAmount: typeof tokenAmount === 'object' ?
+                        tokenAmount.toString() : tokenAmount,
+                    type: typeof tokenAmount
+                }
+            });
+
+            // 改进的 tokenAmount 转换
+            let tokenAmountBN;
+            try {
+                if (BN.isBN(tokenAmount)) {
+                    tokenAmountBN = tokenAmount;
+                } else if (tokenAmount instanceof PublicKey) {
+                    // 如果传入的是 PublicKey,需要先获取余额
+                    const tokenBalance = await this.getTokenBalance(
+                        await this.findAssociatedTokenAddress(tokenAmount, mint)
+                    );
+                    tokenAmountBN = new BN(tokenBalance.value.amount);
+                } else if (typeof tokenAmount === 'string') {
+                    // 清理字符串中的非数字字符
+                    const cleanAmount = tokenAmount.replace(/[^\d]/g, '');
+                    if (!cleanAmount) {
+                        // 如果可能是地址,尝试获取余额
+                        try {
+                            const pubKey = new PublicKey(tokenAmount);
+                            const tokenBalance = await this.getTokenBalance(
+                                await this.findAssociatedTokenAddress(pubKey, mint)
+                            );
+                            tokenAmountBN = new BN(tokenBalance.value.amount);
+                        } catch (e) {
+                            throw new Error('Invalid token amount format');
+                        }
+                    } else {
+                        tokenAmountBN = new BN(cleanAmount);
+                    }
+                } else if (typeof tokenAmount === 'number') {
+                    tokenAmountBN = new BN(Math.floor(tokenAmount).toString());
+                } else if (typeof tokenAmount === 'bigint') {
+                    tokenAmountBN = new BN(tokenAmount.toString());
+                } else {
+                    throw new Error(`Unsupported token amount type: ${typeof tokenAmount}`);
+                }
+            } catch (convError) {
+                logger.error('代币金额转换失败:', {
+                    error: convError.message,
+                    tokenAmount,
+                    type: typeof tokenAmount
+                });
+                throw new Error(`Failed to convert token amount: ${convError.message}`);
+            }
+
+            // 进行剩余的计算...
+            const currentVirtualTokenReserves = new BN(bondingCurveAccount.virtualTokenReserves.toString());
+            const currentVirtualSolReserves = new BN(bondingCurveAccount.virtualSolReserves.toString());
+
+            // 更多详细的日志
+            logger.debug('绑定曲线状态:', {
+                virtualTokenReserves: currentVirtualTokenReserves.toString(),
+                virtualSolReserves: currentVirtualSolReserves.toString(),
+                convertedAmount: tokenAmountBN.toString()
+            });
+
+            const newVirtualTokenReserves = currentVirtualTokenReserves.sub(tokenAmountBN);
+            if (newVirtualTokenReserves.lten(0)) {
+                throw new Error('Sale would deplete token reserves');
+            }
+
+            const k = currentVirtualSolReserves.mul(currentVirtualTokenReserves);
+            const newVirtualSolReserves = k.div(newVirtualTokenReserves);
+            return newVirtualSolReserves.sub(currentVirtualSolReserves);
+
+        } catch (error) {
+            logger.error('计算卖出 SOL 输出失败:', {
+                error: error.message,
+                mint: mint.toString(),
+                tokenAmount: tokenAmount?.toString?.() || tokenAmount,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
 
     // customPumpSDK.js (sell 相关部分)
     // In CustomPumpSDK class
