@@ -196,9 +196,19 @@ export class TokenTradeService {
     // In TokenTradeService class (tokenTradeService.js)
 // In TokenTradeService class (tokenTradeService.js)
     //tokenTradeService.js
+    //tokenTradeService.js
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
         let keypair;
         try {
+            // 1. 清理代币地址
+            const cleanTokenAddress = tokenAddress.trim();
+            logger.info('Sell tokens:', {
+                groupType,
+                accountNumber,
+                tokenAddress: cleanTokenAddress,
+                percentage
+            });
+
             // 2. 获取钱包
             keypair = await this.solanaService.walletService.getWalletKeypair(groupType, accountNumber);
             if (!keypair) {
@@ -207,10 +217,10 @@ export class TokenTradeService {
 
             // 3. 获取代币信息和余额
             const [tokenInfo, tokenBalance] = await Promise.all([
-                this.getTokenInfo(tokenAddress),
+                this.getTokenInfo(cleanTokenAddress),
                 this.solanaService.getTokenBalance(
                     keypair.publicKey.toString(),
-                    tokenAddress
+                    cleanTokenAddress
                 )
             ]);
 
@@ -244,7 +254,7 @@ export class TokenTradeService {
 
             const result = await sdk.sell(
                 keypair,
-                new PublicKey(tokenAddress),
+                new PublicKey(cleanTokenAddress),
                 sellAmount,
                 {
                     ...options,
@@ -258,7 +268,7 @@ export class TokenTradeService {
             await Promise.all([
                 this.saveTradeTransaction({
                     signature: result.signature,
-                    mint: tokenAddress,
+                    mint: cleanTokenAddress,
                     owner: keypair.publicKey.toString(),
                     type: 'sell',
                     amount: sellAmount.toString(),
@@ -271,18 +281,18 @@ export class TokenTradeService {
                         options
                     }
                 }),
-                this.updateBalanceCache(keypair, tokenAddress)
+                this.updateBalanceCache(keypair, cleanTokenAddress)
             ]);
 
             return {
                 success: true,
                 signature: result.signature,
-                requestedPercentage: percentage * 100, // 转回标准百分比显示
+                requestedPercentage: percentage,
                 actualPercentage: (Number(scaledPercentage) * 100) / Number(PRECISION),
                 amount: sellAmount.toString(),
                 tokenDecimals: tokenInfo.decimals || 9,
                 owner: keypair.publicKey.toString(),
-                mint: tokenAddress
+                mint: cleanTokenAddress
             };
 
         } catch (error) {
