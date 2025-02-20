@@ -1811,22 +1811,28 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
 
             if (!accountInfo) {
-                // Try to create associated bonding curve account using 'create' method
+                // Create associated bonding curve account using 'create' method
                 logger.info('Creating associated bonding curve account:', {
                     address: associatedBondingCurveAddress.toString(),
                     user: sellerPubkey.toString(),
                     mint: mintPubkey.toString()
                 });
 
+                // Get metadata address
+                const metadataAddress = await this.findMetadataAddress(mintPubkey);
+
                 const createIx = await this.program.methods
                     .create()
                     .accounts({
-                        global: globalAccount.address,
+                        metadata: metadataAddress,
                         mint: mintPubkey,
+                        global: globalAccount.address,
                         bondingCurve: bondingCurveAddress,
                         associatedBondingCurve: associatedBondingCurveAddress,
+                        associatedUser: tokenAccount,
                         user: sellerPubkey,
                         systemProgram: SystemProgram.programId,
+                        eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
                         tokenProgram: TOKEN_PROGRAM_ID
                     })
                     .instruction();
