@@ -2038,9 +2038,9 @@ async sendTransactionViaNozomi(transaction, signers, config) {
             // 3. 创建交易
             const transaction = new Transaction();
 
-            // 4. 获取指令和签名者
+            // 4. 获取指令和签名者 - 关键修改
             const { instructions, signers } = await this.getSellInstructions(
-                seller,
+                seller.publicKey, // 传递 publicKey 而不是整个 seller 对象
                 mintPublicKey,
                 amount,
                 options.slippageBasisPoints || 100n
