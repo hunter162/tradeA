@@ -1847,8 +1847,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                 this.program.programId
             );
             logger.info('检查是否关联绑定曲线账户aaaaaaaaaaaaaaaaaa', {
-                address: associatedBondingCurveAddress.toString(),
-                size: accountInfo.data?.length || 0
+                address: associatedBondingCurveAddress.toString()
             });
             // 检查账户是否存在
             const accountInfo = await this.connection.getAccountInfo(associatedBondingCurveAddress);
