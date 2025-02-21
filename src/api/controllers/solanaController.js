@@ -258,15 +258,32 @@ export class SolanaController {
                 accountNumber, 
                 tokenAddress, 
                 solAmount, 
-                slippageBasisPoints = 100 
+                slippageBasisPoints = 100,
+                options = {}
             } = req.body;
 
+            const buyOptions = {
+                slippageBasisPoints: parseInt(slippageBasisPoints),
+                usePriorityFee: options.usePriorityFee || false,
+                priorityType: options.priorityType || 'nozomi', // 'jito' or 'nozomi'
+                priorityFeeSol: options.priorityFeeSol ? parseFloat(options.priorityFeeSol) : undefined,
+                tipAmountSol: options.tipAmountSol, // For Jito bundles
+                timeout: options.timeout || 60000,
+                retryCount: options.retryCount || 3
+            };
+            if (buyOptions.usePriorityFee && buyOptions.priorityFeeSol) {
+                if (buyOptions.priorityFeeSol < 0.000001 || buyOptions.priorityFeeSol > 1) {
+                    throw new Error('Priority fee must be between 0.000001 and 1 SOL');
+                }
+            }
             const result = await this.solanaService.buyTokens(
                 groupType,
                 accountNumber,
                 tokenAddress,
                 solAmount,
-                BigInt(slippageBasisPoints)
+                BigInt(slippageBasisPoints),
+                buyOptions.usePriorityFee,
+                buyOptions
             );
 
             res.json({

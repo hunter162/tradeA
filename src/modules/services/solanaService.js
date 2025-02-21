@@ -753,7 +753,7 @@ export class SolanaService {
                 wallet: wallet.publicKey.toString(),
                 tokenAddress,
                 amountSol,
-                slippage
+                slippage,
             });
 
             // 3. 直接使用 SDK 的 buy 方法
@@ -762,8 +762,15 @@ export class SolanaService {
                 new PublicKey(tokenAddress),  // PublicKey
                 buyAmountSol,  // BigInt
                 slippageBasisPoints,  // BigInt
-                usePriorityFee ? await this.calculatePriorityFee() : undefined,
-                'confirmed'  // commitment
+                usePriorityFee,
+                {
+                    usePriorityFee: options.usePriorityFee,
+                    priorityType: options.priorityType,
+                    priorityFeeSol: options.priorityFeeSol,
+                    tipAmountSol: options.tipAmountSol,
+                    timeout: options.timeout,
+                    retryCount: options.retryCount
+                }
             );
 
             logger.info('代币购买成功:', {

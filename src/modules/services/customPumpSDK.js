@@ -1495,18 +1495,21 @@ async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, o
 
             // 3. 处理优先上链
             if (options.usePriorityFee) {
-                const jitoService = new JitoService(this.connection);
-                buyTx = await jitoService.addPriorityFee(buyTx, {
-                    type: options.priorityType || 'jito',
-                    tipAmountSol: priorityFees?.tipAmountSol
-                });
-            }
-            else if (priorityFees?.microLamports) {
-                buyTx.add(
-                    ComputeBudgetProgram.setComputeUnitPrice({
-                        microLamports: priorityFees.microLamports
-                    })
-                );
+                if (options.priorityType === 'nozomi') {
+                    const jitoService = new JitoService(this.connection);
+                    buyTx = await jitoService.addPriorityFee(buyTx, {
+                        tipAmountSol: options.tipAmountSol
+                    });
+                } else {
+                    // Default compute unit price instruction
+                    buyTx.add(
+                        ComputeBudgetProgram.setComputeUnitPrice({
+                            microLamports: options.priorityFeeSol ?
+                                Math.floor(options.priorityFeeSol * LAMPORTS_PER_SOL / 1_000_000) :
+                                100000 // Default priority fee
+                        })
+                    );
+                }
             }
 
             // 4. 获取最新的 blockhash
