@@ -91,13 +91,5 @@ export default (sequelize) => {
             }
         ]
     });
-
-    Transaction.associate = (models) => {
-        Transaction.belongsTo(models.Token, {
-            foreignKey: 'mint',
-            targetKey: 'mint'
-        });
-    };
-
     return Transaction;
 }; 
