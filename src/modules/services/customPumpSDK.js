@@ -1489,7 +1489,14 @@ async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, o
         buyAmountSol: buyAmountSol,
         slippageBasisPoints: slippageBasisPoints,
         priorityFees: priorityFees,
-        options: options
+        options: {
+            usePriorityFee: options.usePriorityFee,
+            priorityType: options.priorityType,
+            priorityFeeSol: options.priorityFeeSol,
+            tipAmountSol: options.tipAmountSol,
+            timeout: options.timeout,
+            retryCount: options.retryCount
+        }
     });
 
     try {
