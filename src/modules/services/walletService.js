@@ -1623,6 +1623,90 @@ export class WalletService {
             throw error;
         }
     }
+    // Add this method to WalletService class
+    async getAllGroupsInfo() {
+        try {
+            logger.info('开始获取所有组信息');
+
+            // 从数据库获取所有组信息
+            const groups = await db.models.Group.findAll({
+                order: [['createdAt', 'DESC']],
+                attributes: [
+                    'id',
+                    'groupType',
+                    'description',
+                    'status',
+                    'createdAt',
+                    'lastUsed',
+                    'metadata',
+                    'updatedAt'
+                ]
+            });
+
+            // 转换为标准格式
+            const groupsInfo = groups.map(group => ({
+                id: group.id,
+                groupType: group.groupType,
+                description: group.description,
+                status: group.status,
+                createdAt: group.createdAt,
+                lastUsed: group.lastUsed,
+                metadata: group.metadata,
+                updatedAt: group.updatedAt
+            }));
+
+            logger.info('获取所有组信息成功', {
+                totalGroups: groupsInfo.length
+            });
+
+            return groupsInfo;
+        } catch (error) {
+            logger.error('获取所有组信息失败:', {
+                error: error.message,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
+    async getBasicGroupInfo(groupType) {
+        try {
+            logger.info('开始获取组基本信息:', { groupType });
+
+            // 获取组信息
+            const group = await db.models.Group.findOne({
+                where: { groupType }
+            });
+
+            if (!group) {
+                throw new Error(`Group ${groupType} not found`);
+            }
+
+            // 只返回基本信息
+            const groupInfo = {
+                id: group.id,
+                groupType: group.groupType,
+                description: group.description,
+                status: group.status,
+                createdAt: group.createdAt,
+                lastUsed: group.lastUsed,
+                metadata: group.metadata
+            };
+
+            logger.info('组基本信息获取成功:', {
+                groupType,
+                groupId: group.id
+            });
+
+            return groupInfo;
+        } catch (error) {
+            logger.error('获取组基本信息失败:', {
+                error: error.message,
+                stack: error.stack,
+                groupType
+            });
+            throw error;
+        }
+    }
 
     // 批量关闭钱包
     async batchCloseWallets(fromGroupType, accountRange, recipientGroupType, recipientAccountNumber) {

@@ -54,6 +54,34 @@ export class GroupController {
             });
         }
     }
+    async getBasicGroupInfo(req, res) {
+        try {
+            const { groupType } = req.params;
+
+            logger.info('获取组基本信息请求:', {
+                groupType,
+                requestId: req.id
+            });
+
+            const info = await this.walletService.getBasicGroupInfo(groupType);
+
+            res.json({
+                success: true,
+                data: info
+            });
+        } catch (error) {
+            logger.error('获取组基本信息失败:', {
+                error: error.message,
+                groupType: req.params.groupType,
+                requestId: req.id
+            });
+
+            res.status(error.message.includes('not found') ? 404 : 500).json({
+                success: false,
+                error: error.message
+            });
+        }
+    }
 
     // 获取所有组
     async getAllGroups(req, res) {

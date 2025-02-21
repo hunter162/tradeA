@@ -40,7 +40,11 @@ export function createWalletRoutes(walletController) {
             await walletController.getBalance(req, res);
         })
     );
-
+    router.get('/:groupType/:accountNumber',
+        asyncHandler(async (req, res) => {
+            await walletController.getWallet(req, res);
+        })
+    );
     // 获取代币余额
     router.get('/:groupType/:accountNumber/tokens/:mintAddress/balance',
         walletValidators.getTokenBalance,

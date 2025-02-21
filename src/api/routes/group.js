@@ -18,7 +18,7 @@ export function createGroupRoutes(groupController) {
     // 获取所有组
     router.get('/',
         asyncHandler(async (req, res) => {
-            await groupController.getGroups(req, res);
+            await groupController.getAllGroups(req, res);
         })
     );
 
@@ -30,7 +30,22 @@ export function createGroupRoutes(groupController) {
             await groupController.getGroup(req, res);
         })
     );
+    router.delete('/:groupType',
+        groupValidators.deleteGroup,
+        validateRequest,
+        asyncHandler(async (req, res) => {
+            await groupController.deleteGroup(req, res);
+        })
+    );
 
+    // 获取组基本信息
+    router.get('/:groupType/info',
+        groupValidators.getGroup,
+        validateRequest,
+        asyncHandler(async (req, res) => {
+            await groupController.getBasicGroupInfo(req, res);
+        })
+    );
     // 更新组
     router.put('/:groupType',
         groupValidators.updateGroup,
