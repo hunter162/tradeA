@@ -1482,6 +1482,16 @@ async checkBalances(creator, mint, solAmount, isSellingTokens = false)
 
 // 修改 buy 方法
 async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, options = {}) {
+
+        logger.info('交易参数:', {
+        buyer: buyer,
+        mint: mint,
+        buyAmountSol: buyAmountSol,
+        slippageBasisPoints: slippageBasisPoints,
+        priorityFees: priorityFees,
+        options: options
+    });
+
     try {
         return await this.withRetry(async () => {
             // 2. 获取购买指令
