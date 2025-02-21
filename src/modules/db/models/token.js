@@ -81,13 +81,5 @@ export default (sequelize) => {
             }
         ]
     });
-
-    Token.associate = (models) => {
-        Token.hasMany(models.Transaction, {
-            foreignKey: 'mint',
-            sourceKey: 'mint'
-        });
-    };
-
     return Token;
 }; 
