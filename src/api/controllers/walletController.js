@@ -13,6 +13,30 @@ export class WalletController {
         this.walletService = walletService;
     }
 
+    async getBatchTokenBalances(req, res){
+        try {
+            if (!this.walletService) {
+                throw new Error('WalletService not initialized');
+            }
+
+            const { groupType, accountNumber } = req.params;
+            logger.info('获取批量代币余额请求:', {
+                groupType: groupType,
+                accountNumber: accountNumber
+            });
+            const tokenInfo = await this.walletService.getWalletTokens(groupType, accountNumber);
+            res.json({
+                success: true,
+                data: tokenInfo
+            });
+        } catch (error) {
+            logger.error('钱包失败:', error);
+            res.status(400).json({
+                success: false,
+                error: error.message
+            });
+        }
+    }
     // 创建钱包
     async createWallet(req, res) {
         try {

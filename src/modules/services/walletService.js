@@ -1,13 +1,11 @@
-import { Keypair, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID, getAssociatedTokenAddress } from '@solana/spl-token';
-import { logger } from '../utils/index.js';
+import {Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction} from '@solana/web3.js';
+import {getAccount, getMint, TOKEN_PROGRAM_ID} from '@solana/spl-token';
+import {EncryptionManager, logger} from '../utils/index.js';
 import db from '../db/index.js';
-import { EncryptionManager } from '../utils/index.js';
-import { ENCRYPTION_CONFIG } from '../../config/encryption.js';
 import bs58 from 'bs58';
-import { CustomError } from '../utils/errors.js';
-import { ErrorCodes } from '../../constants/errorCodes.js';
-import { config } from '../../config/index.js';
+import {CustomError} from '../utils/errors.js';
+import {ErrorCodes} from '../../constants/errorCodes.js';
+import {config} from '../../config/index.js';
 
 export class WalletService {
     constructor(solanaService) {
@@ -1209,7 +1207,337 @@ export class WalletService {
             );
         }
     }
+    async getWalletTokens(groupType, accountNumber) {
+        try {
+            logger.info('开始获取钱包代币信息:', {
+                groupType,
+                accountNumber
+            });
 
+            // 1. 先获取钱包
+            const wallet = await this.getWallet(groupType, accountNumber);
+            if (!wallet) {
+                throw new Error(`钱包不存在: ${groupType}-${accountNumber}`);
+            }
+
+            // 2. 获取该钱包的所有代币账户
+            const walletPublicKey = new PublicKey(wallet.publicKey);
+            const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
+                walletPublicKey,
+                {
+                    programId: TOKEN_PROGRAM_ID
+                }
+            );
+
+            // 3. 提取代币信息
+            const tokens = tokenAccounts.value.map(item => {
+                const accountInfo = item.account.data.parsed.info;
+                return {
+                    name: accountInfo.mint, // 代币地址，可以根据需要获取名称
+                    address: accountInfo.mint,
+                    amount: accountInfo.tokenAmount.uiAmount
+                };
+            });
+
+            logger.info('获取钱包代币信息成功:', {
+                groupType,
+                accountNumber,
+                tokenCount: tokens.length
+            });
+
+            return {
+                wallet: {
+                    groupType,
+                    accountNumber,
+                    publicKey: wallet.publicKey
+                },
+                tokens
+            };
+        } catch (error) {
+            logger.error('获取钱包代币失败:', {
+                error: error.message,
+                groupType,
+                accountNumber
+            });
+            throw error;
+        }
+    }
+
+    async getEnhancedTokenInfo(mintAddress) {
+        try {
+            logger.info('获取增强的代币信息:', { mintAddress });
+
+            const mintPublicKey = new PublicKey(mintAddress);
+
+            // 获取代币铸造信息
+            const mintInfo = await getMint(
+                this.connection,
+                mintPublicKey,
+                'confirmed',
+                TOKEN_PROGRAM_ID
+            );
+
+            // 获取代币所有账户
+            const accounts = await this.connection.getTokenLargestAccounts(mintPublicKey);
+
+            // 获取每个账户的详细信息
+            const accountsInfo = await Promise.all(
+                accounts.value.map(async (account) => {
+                    try {
+                        const accountInfo = await getAccount(
+                            this.connection,
+                            account.address,
+                            'confirmed',
+                            TOKEN_PROGRAM_ID
+                        );
+
+                        return {
+                            address: account.address.toString(),
+                            amount: account.amount,
+                            uiAmount: Number(account.amount) / Math.pow(10, mintInfo.decimals),
+                            owner: accountInfo.owner.toString(),
+                            delegate: accountInfo.delegate?.toString(),
+                            delegatedAmount: accountInfo.delegatedAmount?.toString(),
+                            isFrozen: accountInfo.isFrozen
+                        };
+                    } catch (error) {
+                        logger.error('获取账户信息失败:', {
+                            error: error.message,
+                            accountAddress: account.address.toString()
+                        });
+                        return null;
+                    }
+                })
+            );
+
+            const tokenInfo = {
+                address: mintAddress,
+                decimals: mintInfo.decimals,
+                freezeAuthority: mintInfo.freezeAuthority?.toString(),
+                mintAuthority: mintInfo.mintAuthority?.toString(),
+                supply: {
+                    raw: mintInfo.supply.toString(),
+                    ui: Number(mintInfo.supply) / Math.pow(10, mintInfo.decimals)
+                },
+                isInitialized: mintInfo.isInitialized,
+                largestAccounts: accountsInfo.filter(Boolean),
+                programId: TOKEN_PROGRAM_ID.toString()
+            };
+
+            logger.info('代币信息获取成功:', {
+                mintAddress,
+                supply: tokenInfo.supply.ui,
+                decimals: tokenInfo.decimals,
+                accountsCount: tokenInfo.largestAccounts.length
+            });
+
+            return tokenInfo;
+        } catch (error) {
+            logger.error('获取增强的代币信息失败:', {
+                error: error.message,
+                stack: error.stack,
+                mintAddress
+            });
+            throw error;
+        }
+    }
+
+// 获取代币的供应信息
+    async getTokenSupplyInfo(mintAddress) {
+        try {
+            const mintPublicKey = new PublicKey(mintAddress);
+            const mintInfo = await getMint(
+                this.connection,
+                mintPublicKey,
+                'confirmed',
+                TOKEN_PROGRAM_ID
+            );
+
+            return {
+                mintAddress,
+                supply: mintInfo.supply.toString(),
+                decimals: mintInfo.decimals,
+                uiSupply: Number(mintInfo.supply) / Math.pow(10, mintInfo.decimals),
+                mintAuthority: mintInfo.mintAuthority?.toString(),
+                freezeAuthority: mintInfo.freezeAuthority?.toString()
+            };
+        } catch (error) {
+            logger.error('获取代币供应信息失败:', {
+                error: error.message,
+                mintAddress
+            });
+            throw error;
+        }
+    }
+
+// 获取钱包的所有代币账户
+    async getWalletTokenAccounts(walletAddress) {
+        try {
+            const walletPublicKey = new PublicKey(walletAddress);
+
+            // 获取所有代币账户
+            const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
+                walletPublicKey,
+                {
+                    programId: TOKEN_PROGRAM_ID
+                }
+            );
+
+            // 处理每个代币账户的信息
+            const accountsInfo = tokenAccounts.value.map(account => {
+                const accountInfo = account.account.data.parsed.info;
+                return {
+                    tokenAddress: accountInfo.mint,
+                    accountAddress: account.pubkey.toString(),
+                    balance: {
+                        raw: accountInfo.tokenAmount.amount,
+                        ui: accountInfo.tokenAmount.uiAmount
+                    },
+                    decimals: accountInfo.tokenAmount.decimals,
+                    owner: accountInfo.owner,
+                    state: accountInfo.state
+                };
+            });
+
+            logger.info('获取钱包代币账户成功:', {
+                walletAddress,
+                accountCount: accountsInfo.length
+            });
+
+            return accountsInfo;
+        } catch (error) {
+            logger.error('获取钱包代币账户失败:', {
+                error: error.message,
+                stack: error.stack,
+                walletAddress
+            });
+            throw error;
+        }
+    }
+
+// 检查代币账户是否存在
+    async checkTokenAccount(walletAddress, mintAddress) {
+        try {
+            const walletPublicKey = new PublicKey(walletAddress);
+            const mintPublicKey = new PublicKey(mintAddress);
+
+            const accounts = await this.connection.getParsedTokenAccountsByOwner(
+                walletPublicKey,
+                {
+                    mint: mintPublicKey
+                }
+            );
+
+            if (accounts.value.length === 0) {
+                return {
+                    exists: false,
+                    account: null
+                };
+            }
+
+            const accountInfo = accounts.value[0].account.data.parsed.info;
+            return {
+                exists: true,
+                account: {
+                    address: accounts.value[0].pubkey.toString(),
+                    balance: accountInfo.tokenAmount.uiAmount,
+                    decimals: accountInfo.tokenAmount.decimals,
+                    owner: accountInfo.owner
+                }
+            };
+        } catch (error) {
+            logger.error('检查代币账户失败:', {
+                error: error.message,
+                walletAddress,
+                mintAddress
+            });
+            throw error;
+        }
+    }
+
+    async getTokenAccountInfo(walletAddress, mintAddress) {
+        try {
+            logger.info('获取代币账户信息:', {
+                walletAddress,
+                mintAddress
+            });
+
+            // 获取关联代币账户地址
+            const associatedTokenAddress = await getAssociatedTokenAddress(
+                new PublicKey(mintAddress),
+                new PublicKey(walletAddress)
+            );
+
+            // 获取账户信息
+            const accountInfo = await this.connection.getParsedAccountInfo(associatedTokenAddress);
+
+            if (!accountInfo.value) {
+                return null;
+            }
+
+            const tokenAmount = accountInfo.value.data.parsed.info.tokenAmount;
+
+            return {
+                address: associatedTokenAddress.toString(),
+                mint: mintAddress,
+                owner: walletAddress,
+                amount: tokenAmount.uiAmount,
+                decimals: tokenAmount.decimals,
+                uiAmountString: tokenAmount.uiAmountString
+            };
+        } catch (error) {
+            logger.error('获取代币账户信息失败:', {
+                error: error.message,
+                stack: error.stack,
+                walletAddress,
+                mintAddress
+            });
+            return null;
+        }
+    }
+
+    async getTokenInfo(mintAddress) {
+        try {
+            logger.info('获取代币详细信息:', { mintAddress });
+
+            // 获取代币元数据
+            const tokenMetadata = await this.solanaService.getTokenMetadata(mintAddress);
+
+            // 获取代币供应量
+            const supply = await this.connection.getTokenSupply(new PublicKey(mintAddress));
+
+            // 获取代币账户数量
+            const tokenAccounts = await this.connection.getTokenAccountsByOwner(
+                new PublicKey(mintAddress),
+                { programId: TOKEN_PROGRAM_ID }
+            );
+
+            const tokenInfo = {
+                address: mintAddress,
+                name: tokenMetadata?.name || 'Unknown Token',
+                symbol: tokenMetadata?.symbol || '-',
+                decimals: supply.value.decimals,
+                totalSupply: supply.value.uiAmount,
+                holderCount: tokenAccounts.value.length,
+                metadata: tokenMetadata
+            };
+
+            // 缓存结果
+            if (this.redis) {
+                const cacheKey = `token:info:${mintAddress}`;
+                await this.redis.set(cacheKey, JSON.stringify(tokenInfo), 'EX', 300);
+            }
+
+            return tokenInfo;
+        } catch (error) {
+            logger.error('获取代币详细信息失败:', {
+                error: error.message,
+                stack: error.stack,
+                mintAddress
+            });
+            throw error;
+        }
+    }
     // 修改批量更新余额的辅助方法
     async _updateWalletBalances(wallets) {
         try {

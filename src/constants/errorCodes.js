@@ -24,7 +24,8 @@ export const ErrorCodes = {
         HIGH_FEE: 3005,
         BALANCE_CHECK_FAILED: 3003,
         NO_VALID_TRANSFERS: 3004,
-        MANY_TO_ONE_FAILED: 3005
+        MANY_TO_ONE_FAILED: 3005,
+        TRANSFER_FAILED: 3016
     },
 
     // 钱包错误 (4xxx)

@@ -40,11 +40,13 @@ export function createWalletRoutes(walletController) {
             await walletController.getBalance(req, res);
         })
     );
+
     router.get('/:groupType/:accountNumber',
         asyncHandler(async (req, res) => {
             await walletController.getWallet(req, res);
         })
     );
+
     // 获取代币余额
     router.get('/:groupType/:accountNumber/tokens/:mintAddress/balance',
         walletValidators.getTokenBalance,
@@ -55,7 +57,7 @@ export function createWalletRoutes(walletController) {
     );
 
     // 批量获取代币余额
-    router.post('/:groupType/:accountNumber/tokens/balances',
+    router.get('/:groupType/:accountNumber/tokens/balances',
         walletValidators.getBatchTokenBalances,
         validateRequest,
         asyncHandler(async (req, res) => {
