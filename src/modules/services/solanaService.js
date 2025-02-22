@@ -54,7 +54,22 @@ const CACHE_KEYS = {
     BALANCE_SOL: (pubkey) => `balance:sol:${pubkey}`,
     TOKEN_BALANCE: (pubkey, mint) => `balance:token:${pubkey}:${mint}`
 };
+const validateBatchResult = (batchResult) => {
+    if (!batchResult) throw new Error('Batch result is required');
+    if (!batchResult.groupType) throw new Error('groupType is required');
+    if (!batchResult.accountNumber) throw new Error('accountNumber is required');
+    if (!batchResult.tokenAmount) throw new Error('tokenAmount is required');
+    if (!batchResult.solAmount) throw new Error('solAmount is required');
+    return true;
+};
 
+const validateTransaction = (tx) => {
+    if (!tx.signature) throw new Error('Transaction signature is required');
+    if (!tx.mint) throw new Error('Transaction mint is required');
+    if (!tx.groupType) throw new Error('Transaction groupType is required');
+    if (!tx.accountNumber) throw new Error('Transaction accountNumber is required');
+    return true;
+};
 export class SolanaService {
     constructor(config) {
         try {
@@ -464,6 +479,43 @@ export class SolanaService {
                 this.getNextEndpoint();
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
+        }
+    }
+
+
+    async getBalanceUpdate(publicKey) {
+        try {
+            const pubKey = typeof publicKey === 'string'
+                ? new PublicKey(publicKey)
+                : publicKey;
+
+            // 从链上获取余额 (lamports)
+            const balanceInLamports = await this.connection.getBalance(pubKey);
+            // 转换为 SOL
+            const balanceInSOL = balanceInLamports / LAMPORTS_PER_SOL;
+
+            logger.info('获取链上余额:', {
+                publicKey: pubKey.toString(),
+                lamports: balanceInLamports,
+                sol: balanceInSOL
+            });
+
+            // 缓存 SOL 值
+            if (this.redis) {
+                await this.redis.set(
+                    CACHE_KEYS.BALANCE_SOL(pubKey.toString()),
+                    balanceInSOL.toString(),  // 存储 SOL 值
+                    { EX: 60 }
+                );
+            }
+
+            return balanceInSOL;
+        } catch (error) {
+            logger.error('获取余额失败:', {
+                error: error.message,
+                publicKey: publicKey?.toString?.() || publicKey
+            });
+            throw error;
         }
     }
 
@@ -1131,93 +1183,6 @@ export class SolanaService {
         }
     }
 
-    // 批量订阅余额变动
-    async subscribeToBalanceChanges(wallets) {
-        try {
-            logger.info('开始批量订阅余额变动', {
-                walletsCount: wallets.length
-            });
-
-            const subscriptions = [];
-            for (const wallet of wallets) {
-                const publicKey = new PublicKey(wallet.publicKey);
-
-                // 如果已经订阅，先取消旧的订阅
-                if (this.subscriptions.has(wallet.publicKey)) {
-                    await this.unsubscribeFromBalance(wallet.publicKey);
-                }
-
-                // 创建新的订阅
-                const subscriptionId = this.connection.onAccountChange(
-                    publicKey,
-                    async (accountInfo) => {
-                        try {
-                            const newBalance = accountInfo.lamports / LAMPORTS_PER_SOL;
-
-                            // 更新 Redis 缓存
-                            if (this.redis) {
-                                await this.redis.setBalance(wallet.publicKey, newBalance);
-                            }
-
-                            // 记录余额变动
-                            if (db && db.BalanceHistory) {
-                                await db.BalanceHistory.create({
-                                    groupType: wallet.groupType,
-                                    accountNumber: wallet.accountNumber,
-                                    publicKey: wallet.publicKey,
-                                    previousBalance: wallet.lastKnownBalance || 0,
-                                    currentBalance: newBalance,
-                                    changeAmount: newBalance - (wallet.lastKnownBalance || 0),
-                                    transactionType: 'other',
-                                    metadata: {
-                                        source: 'websocket',
-                                        timestamp: new Date().toISOString()
-                                    }
-                                });
-                            }
-
-                            logger.info('检测到余额变动', {
-                                publicKey: wallet.publicKey,
-                                groupType: wallet.groupType,
-                                accountNumber: wallet.accountNumber,
-                                newBalance,
-                                change: newBalance - (wallet.lastKnownBalance || 0)
-                            });
-                        } catch (error) {
-                            logger.error('处理余额变动失败:', {
-                                error,
-                                publicKey: wallet.publicKey,
-                                groupType: wallet.groupType,
-                                accountNumber: wallet.accountNumber
-                            });
-                        }
-                    },
-                    'confirmed'
-                );
-
-                this.subscriptions.set(wallet.publicKey, {
-                    id: subscriptionId,
-                    wallet
-                });
-
-                subscriptions.push({
-                    publicKey: wallet.publicKey,
-                    subscriptionId
-                });
-            }
-
-            logger.info('批量订阅完成', {
-                successCount: subscriptions.length,
-                totalCount: wallets.length
-            });
-
-            return subscriptions;
-        } catch (error) {
-            logger.error('批量订阅余额变动失败:', error);
-            throw error;
-        }
-    }
-
     // 取消单个订阅
     async unsubscribeFromBalance(publicKey) {
         try {
@@ -1666,7 +1631,6 @@ export class SolanaService {
             throw serviceError;
         }
     }
-
     async updateAccountBalances(wallet, mint, tokenAmount, solAmount) {
         try {
             logger.info('开始更新账户余额:', {
@@ -1678,88 +1642,6 @@ export class SolanaService {
 
             // 1. 更新 Redis 缓存
             if (this.redis) {
-                const pipeline = this.redis.pipeline();
-
-                // 更新代币余额缓存
-                if (mint && tokenAmount !== undefined) {
-                    const tokenBalanceKey = `token:balance:${wallet.publicKey.toString()}:${mint}`;
-                    pipeline.set(tokenBalanceKey, tokenAmount.toString(), 'EX', 300); // 5分钟过期
-                }
-
-                // 更新 SOL 余额缓存
-                if (solAmount !== undefined) {
-                    const solBalanceKey = `balance:sol:${wallet.publicKey.toString()}`;
-                    pipeline.set(solBalanceKey, solAmount.toString(), 'EX', 300);
-                }
-
-                await pipeline.exec();
-                logger.debug('Redis 缓存更新成功');
-            }
-
-            // 2. 更新数据库(如果需要)
-            if (mint) {
-                await db.models.TokenBalance.upsert({
-                    owner: wallet.publicKey.toString(),
-                    mint: mint.toString(),
-                    balance: tokenAmount.toString(),
-                    updatedAt: new Date()
-                });
-            }
-
-            // 3. 返回最新余额
-            return {
-                tokenBalance: tokenAmount?.toString(),
-                solBalance: solAmount?.toString(),
-                timestamp: Date.now()
-            };
-
-        } catch (error) {
-            logger.error('更新账户余额失败:', {
-                error: error.message,
-                wallet: wallet.publicKey.toString(),
-                mint: mint?.toString()
-            });
-            // 不抛出错误,让流程继续
-        }
-    }
-
-// 批量更新多个账户余额
-    async batchUpdateBalances(updates) {
-        try {
-            const results = await Promise.all(
-                updates.map(update =>
-                    this.updateAccountBalances(
-                        update.wallet,
-                        update.mint,
-                        update.tokenAmount,
-                        update.solAmount
-                    )
-                )
-            );
-
-            logger.info('批量更新余额完成:', {
-                count: updates.length,
-                success: results.filter(Boolean).length
-            });
-
-            return results;
-        } catch (error) {
-            logger.error('批量更新余额失败:', error);
-        }
-    }
-    async updateAccountBalances(wallet, mint, tokenAmount, solAmount) {
-        try {
-            logger.info('开始更新账户余额:', {
-                wallet: wallet.publicKey.toString(),
-                mint: mint?.toString(),
-                tokenAmount: tokenAmount?.toString(),
-                solAmount: solAmount?.toString()
-            });
-
-            // 1. 更新 Redis 缓存
-            if (this.redis) {
-                const pipeline = this.redis.pipeline();
-
                 // 更新代币余额缓存
                 if (mint && tokenAmount !== undefined) {
                     const tokenBalanceKey = `token:balance:${wallet.publicKey.toString()}:${mint}`;
@@ -1767,16 +1649,18 @@ export class SolanaService {
                         amount: tokenAmount.toString(),
                         lastUpdate: Date.now()
                     };
-                    pipeline.set(tokenBalanceKey, JSON.stringify(tokenBalanceData), 'EX', 300);
+                    await this.redis.set(
+                        tokenBalanceKey,
+                        JSON.stringify(tokenBalanceData),
+                        'EX',
+                        300
+                    );
                 }
 
                 // 更新 SOL 余额缓存
                 if (solAmount !== undefined) {
-                    const solBalanceKey = `balance:sol:${wallet.publicKey.toString()}`;
-                    pipeline.set(solBalanceKey, solAmount.toString(), 'EX', 300);
+                    await this.getBalanceUpdate(wallet.publicKey.toString())
                 }
-
-                await pipeline.exec();
                 logger.debug('Redis 缓存更新成功');
             }
 
@@ -1805,110 +1689,119 @@ export class SolanaService {
         }
     }
 
-    async batchUpdateBalances(updates) {
-        try {
-            const results = await Promise.all(
-                updates.map(update =>
-                    this.updateAccountBalances(
-                        update.wallet,
-                        update.mint,
-                        update.tokenAmount,
-                        update.solAmount
-                    )
-                )
-            );
-
-            logger.info('批量更新余额完成:', {
-                count: updates.length,
-                success: results.filter(Boolean).length
-            });
-
-            return results;
-        } catch (error) {
-            logger.error('批量更新余额失败:', error);
-        }
-    }
 
     async handleBatchAccounts(batchResults, mint, parentSignature) {
-        try {
-            if (!batchResults?.length) return [];
+        if (!batchResults?.length) return [];
 
-            const batchPromises = batchResults.map(async batchResult => {
+        const results = [];
+        const errors = [];
+
+        for (const batchResult of batchResults) {
+            try {
+                // Validate batch result
+                validateBatchResult(batchResult);
+
                 const batchWallet = await this.walletService.getWalletKeypair(
                     batchResult.groupType,
                     batchResult.accountNumber
                 );
 
-                // 1. 更新余额
-                await this.updateAccountBalances(
-                    batchWallet,
-                    new PublicKey(mint),
-                    batchResult.tokenAmount,
-                    batchResult.solAmount
-                );
+                if (!batchWallet) {
+                    throw new Error(`Wallet not found: ${batchResult.groupType}-${batchResult.accountNumber}`);
+                }
 
-                // 2. 设置代币追踪
-                await this.setupTokenTracking(
-                    batchWallet.publicKey.toString(),
-                    mint,
-                    batchResult.tokenAmount || '0'
-                );
+                // Start a database transaction
+                const dbTransaction = await db.sequelize.transaction();
 
-                // 3. 设置WebSocket订阅
-                const subscriptionId = await this.subscribeToTokenBalance(
-                    batchWallet.publicKey,
-                    mint
-                );
+                try {
+                    // 1. Update balances with transaction
+                    await this.updateAccountBalances(
+                        batchWallet,
+                        new PublicKey(mint),
+                        batchResult.tokenAmount,
+                        batchResult.solAmount,
+                        { transaction: dbTransaction }
+                    );
 
-                // 4. 记录交易
-                await db.models.Transaction.create({
-                    signature: batchResult.signature,
-                    mint: mint,
-                    owner: batchWallet.publicKey.toString(),
-                    type: 'create_and_buy',
-                    amount: batchResult.solAmount.toString(),
-                    tokenAmount: batchResult.tokenAmount.toString(),
-                    status: 'success',
-                    groupType: batchResult.groupType,
-                    accountNumber: batchResult.accountNumber,
-                    raw: {
-                        ...batchResult,
-                        parentSignature,
+                    // 2. Setup token tracking
+                    await this.setupTokenTracking(
+                        batchWallet.publicKey.toString(),
+                        mint,
+                        batchResult.tokenAmount || '0'
+                    );
+
+                    // 3. Setup WebSocket subscription
+                    const subscriptionId = await this.subscribeToTokenBalance(
+                        batchWallet.publicKey,
+                        mint
+                    );
+
+                    // 4. Record transaction with transaction
+                    const txRecord = await db.models.Transaction.create({
+                        signature: batchResult.signature,
+                        mint: mint,
+                        owner: batchWallet.publicKey.toString(),
+                        type: 'create_and_buy',
+                        amount: batchResult.solAmount.toString(),
+                        tokenAmount: batchResult.tokenAmount.toString(),
+                        status: 'success',
+                        groupType: batchResult.groupType,
+                        accountNumber: batchResult.accountNumber,
+                        raw: {
+                            ...batchResult,
+                            parentSignature,
+                            subscriptionId,
+                            timestamp: new Date().toISOString()
+                        }
+                    }, { transaction: dbTransaction });
+
+                    // Commit transaction
+                    await dbTransaction.commit();
+
+                    results.push({
+                        wallet: batchWallet.publicKey.toString(),
+                        groupType: batchResult.groupType,
+                        accountNumber: batchResult.accountNumber,
+                        tokenAmount: batchResult.tokenAmount,
+                        solAmount: batchResult.solAmount,
                         subscriptionId,
-                        timestamp: new Date().toISOString()
-                    }
-                });
+                        transactionId: txRecord.id
+                    });
 
-                return {
-                    wallet: batchWallet.publicKey.toString(),
+                } catch (error) {
+                    // Rollback transaction on error
+                    await dbTransaction.rollback();
+                    throw error;
+                }
+
+            } catch (error) {
+                logger.error('批量账户处理单个记录失败:', {
+                    error: error.message,
+                    batchResult,
+                    mint,
+                    stack: error.stack
+                });
+                errors.push({
                     groupType: batchResult.groupType,
                     accountNumber: batchResult.accountNumber,
-                    tokenAmount: batchResult.tokenAmount,
-                    solAmount: batchResult.solAmount,
-                    subscriptionId
-                };
-            });
-
-            const results = await Promise.all(batchPromises);
-
-            logger.info('批量账户处理完成:', {
-                count: results.length,
-                mint,
-                accounts: results.map(r => ({
-                    wallet: r.wallet,
-                    subscriptionId: r.subscriptionId
-                }))
-            });
-
-            return results;
-        } catch (error) {
-            logger.error('批量账户处理失败:', {
-                error: error.message,
-                mint,
-                batchCount: batchResults?.length
-            });
-            throw error;
+                    error: error.message
+                });
+            }
         }
+
+        // Log summary
+        logger.info('批量账户处理完成:', {
+            successCount: results.length,
+            errorCount: errors.length,
+            mint,
+            errors: errors.length > 0 ? errors : undefined
+        });
+
+        if (results.length === 0 && errors.length > 0) {
+            throw new Error(`All batch accounts failed to process: ${errors.map(e => e.error).join(', ')}`);
+        }
+
+        return results;
     }
 
     async subscribeToTokenBalance(publicKey, mint) {
@@ -1967,6 +1860,29 @@ export class SolanaService {
                 mint
             });
             return null;
+        }
+    }
+    async batchUpdateBalances(updates) {
+        try {
+            const results = await Promise.all(
+                updates.map(update =>
+                    this.updateAccountBalances(
+                        update.wallet,
+                        update.mint,
+                        update.tokenAmount,
+                        update.solAmount
+                    )
+                )
+            );
+
+            logger.info('批量更新余额完成:', {
+                count: updates.length,
+                success: results.filter(Boolean).length
+            });
+
+            return results;
+        } catch (error) {
+            logger.error('批量更新余额失败:', error);
         }
     }
     async createAndBuy({ groupType, accountNumber, metadata, solAmount, options = {} }) {
@@ -2053,7 +1969,9 @@ export class SolanaService {
                         }
                         return {
                             wallet,
-                            solAmount: tx.solAmount
+                            solAmount: tx.solAmount,
+                            groupType:tx.groupType,
+                            accountNumber:tx.accountNumber
                         };
                     })
                 );
@@ -2066,7 +1984,8 @@ export class SolanaService {
                 priorityFeeSol: options.priorityFeeSol,
                 priorityType: options.priorityType || 'Jito',
                 tipAmountSol: options.tipAmountSol,
-                batchTransactions: batchWallets
+                batchTransactions: batchWallets,
+
             };
 
             // 9. 执行创建和购买
@@ -2140,32 +2059,32 @@ export class SolanaService {
                 result.tokenAmount || '0'
             );
 
-            // 13. 处理批量交易记录和余额
+            // // 13. 处理批量交易记录和余额
             if (result.batchResults?.length > 0) {
-                // 记录批量交易到数据库
-                const batchTransactions = await Promise.all(
-                    result.batchResults.map(batchResult =>
-                        db.models.Transaction.create({
-                            signature: batchResult.signature,
-                            mint: result.mint,
-                            owner: wallet.publicKey.toString(),
-                            type: 'create_and_buy',
-                            amount: batchResult.solAmount.toString(),
-                            tokenAmount: batchResult.tokenAmount.toString(),
-                            status: 'success',
-                            groupType: batchResult.groupType,
-                            accountNumber: batchResult.accountNumber,
-                            raw: {
-                                ...batchResult,
-                                parentSignature: result.signature,
-                                timestamp: new Date().toISOString()
-                            }
-                        })
-                    )
-                );
-
-                // 更新批量交易余额
-                await this.batchUpdateBalances(batchTransactions);
+            //     // 记录批量交易到数据库
+            //     const batchTransactions = await Promise.all(
+            //         result.batchResults.map(batchResult =>
+            //             db.models.Transaction.create({
+            //                 signature: batchResult.signature,
+            //                 mint: result.mint,
+            //                 owner: wallet.publicKey.toString(),
+            //                 type: 'create_and_buy',
+            //                 amount: batchResult.solAmount.toString(),
+            //                 tokenAmount: batchResult.tokenAmount.toString(),
+            //                 status: 'success',
+            //                 groupType: batchResult.groupType,
+            //                 accountNumber: batchResult.accountNumber,
+            //                 raw: {
+            //                     ...batchResult,
+            //                     parentSignature: result.signature,
+            //                     timestamp: new Date().toISOString()
+            //                 }
+            //             })
+            //         )
+            //     );
+            //
+            //     // 更新批量交易余额
+            //     await this.batchUpdateBalances(batchTransactions);
 
                 // 处理批量账户的订阅和追踪
                 batchResults = await this.handleBatchAccounts(
@@ -2221,6 +2140,7 @@ export class SolanaService {
                     confirmations: 1
                 },
                 batchResults: batchResults.map(r => ({
+                    signature: r.signature,
                     wallet: r.wallet,
                     groupType: r.groupType,
                     accountNumber: r.accountNumber,
@@ -2739,10 +2659,14 @@ export class SolanaService {
     }
 
     // 批量订阅账户余额变动
-    async subscribeToBalanceChanges(accounts) {
+    async subscribeToBalanceChanges(wallets) {
         try {
+            logger.info('开始批量订阅余额变动', {
+                walletsCount: wallets.length
+            });
+
             const subscriptions = [];
-            for (const wallet of accounts) {
+            for (const wallet of wallets) {
                 const publicKey = new PublicKey(wallet.publicKey);
 
                 // 如果已经订阅，先取消旧的订阅
@@ -2811,18 +2735,16 @@ export class SolanaService {
 
             logger.info('批量订阅完成', {
                 successCount: subscriptions.length,
-                totalCount: accounts.length
+                totalCount: wallets.length
             });
 
             return subscriptions;
         } catch (error) {
-            logger.error('批量订阅失败:', {
-                error: error.message,
-                accountCount: accounts.length
-            });
+            logger.error('批量订阅余额变动失败:', error);
             throw error;
         }
     }
+
 
     // 通知余额变动
     async notifyBalanceChange(publicKey, newBalance) {
@@ -3485,7 +3407,38 @@ export class SolanaService {
             throw error;
         }
     }
+    validateBatchResult(batchResult) {
+        const errors = [];
 
+        // 数据存在性检查
+        if (!batchResult) {
+            throw new Error('Batch result is required');
+        }
+
+        // 必填字段检查
+        if (!batchResult.groupType) errors.push('groupType is required');
+        if (!batchResult.accountNumber) errors.push('accountNumber is required');
+        if (!batchResult.signature) errors.push('signature is required');  // 增加 signature 检查
+
+        // 金额校验
+        if (typeof batchResult.tokenAmount === 'undefined') errors.push('tokenAmount is required');
+        if (typeof batchResult.solAmount === 'undefined') errors.push('solAmount is required');
+
+        // 类型和格式校验
+        if (batchResult.accountNumber && !Number.isInteger(Number(batchResult.accountNumber))) {
+            errors.push('accountNumber must be an integer');
+        }
+
+        if (batchResult.solAmount && isNaN(Number(batchResult.solAmount))) {
+            errors.push('solAmount must be a number');
+        }
+
+        if (errors.length > 0) {
+            throw new Error(`Validation errors: ${errors.join(', ')}`);
+        }
+
+        return true;
+    }
     async updateTokenBalance(owner, mint) {
         try {
             // 1. 获取最新余额
