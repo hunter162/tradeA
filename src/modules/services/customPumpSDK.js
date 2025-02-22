@@ -1565,218 +1565,236 @@ async checkBalances(creator, mint, solAmount, isSellingTokens = false)
 }
 
 // 修改 buy 方法
-async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, options = {}) {
+    async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, options = {}) {
+        const startTime = Date.now();
+        let jitoService = null;
 
-        logger.info('交易参数:', {
-        buyer: buyer,
-        mint: mint,
-        buyAmountSol: buyAmountSol,
-        slippageBasisPoints: slippageBasisPoints,
-        priorityFees: priorityFees,
-        options: {
-            usePriorityFee: options.usePriorityFee,
-            priorityType: options.priorityType,
-            priorityFeeSol: options.priorityFeeSol,
-            tipAmountSol: options.tipAmountSol,
-            timeout: options.timeout,
-            retryCount: options.retryCount
-        }
-    });
-
-    try {
-        return await this.withRetry(async () => {
-            // 2. 获取购买指令
-            let buyTx = await super.getBuyInstructionsBySolAmount(
-                buyer.publicKey,
-                mint,
-                buyAmountSol,
-                slippageBasisPoints,
-                'confirmed'
-            );
-
-            // 3. 处理优先上链
-            if (options.usePriorityFee) {
-                if (options.priorityType === 'Jito') {
-                    const jitoService = new JitoService(this.connection);
-                    await jitoService.initialize();
-                    buyTx = await jitoService.addTipToTransaction(buyTx, {
-                        tipAmountSol: options.tipAmountSol
-                    });
-                } else {
-                    // Default compute unit price instruction
-                    buyTx.add(
-                        ComputeBudgetProgram.setComputeUnitPrice({
-                            microLamports: options.priorityFeeSol ?
-                                Math.floor(options.priorityFeeSol * LAMPORTS_PER_SOL / 1_000_000) :
-                                100000 // Default priority fee
-                        })
-                    );
-                }
+        try {
+            // 1. 参数验证
+            if (!buyer?.publicKey) throw new Error('Invalid buyer wallet');
+            if (!mint) throw new Error('Invalid mint address');
+            if (typeof buyAmountSol === 'undefined' || buyAmountSol <= 0) {
+                throw new Error('Invalid buy amount');
             }
 
-            // 4. 获取最新的 blockhash
-            const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
-
-            buyTx.recentBlockhash = blockhash;
-            buyTx.lastValidBlockHeight = lastValidBlockHeight;
-            buyTx.feePayer = buyer.publicKey;
-
-            // 5. 模拟交易
-            logger.info('开始模拟交易...');
-            const simulation = await this.connection.simulateTransaction(buyTx, [buyer], {
-                sigVerify: false,
-                commitment: 'confirmed',
-                replaceRecentBlockhash: true
-            });
-
-            // 6. 分析模拟结果
-            if (simulation.value.err) {
-                const logs = simulation.value.logs || [];
-                logger.error('交易模拟失败:', {
-                    error: simulation.value.err,
-                    logs: logs,
-                    mint: mint.toString(),
-                    buyer: buyer.publicKey.toString()
-                });
-
-                // 检查具体错误类型
-                if (logs.some(log => log.includes('Bonding curve account not found'))) {
-                    throw new Error(`Token ${mint.toString()} is not a valid pump token. Please create it first.`);
-                }
-                if (logs.some(log => log.includes('insufficient funds'))) {
-                    throw new Error('Insufficient funds for transaction');
-                }
-                throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
-            }
-
-            // 7. 计算预估费用
-            const estimatedFee = await this.connection.getFeeForMessage(
-                buyTx.compileMessage(),
-                'confirmed'
-            );
-
-            // 8. 检查余额是否足够支付费用
-            const balance = await this.connection.getBalance(buyer.publicKey);
-            const totalRequired = buyAmountSol + BigInt(estimatedFee.value || 0);
-            if (BigInt(balance) < totalRequired) {
-                throw new Error(`Insufficient balance. Required: ${totalRequired}, Current: ${balance}`);
-            }
-
-            logger.info('交易模拟成功:', {
-                computeUnits: simulation.value.unitsConsumed || 0,
-                estimatedFee: estimatedFee.value || 0,
-                logs: simulation.value.logs
-            });
-
-            // 9. 获取最新的区块信息用于实际发送
-            const { value: { blockhash: sendBlockhash, lastValidBlockHeight: sendValidHeight }, context: sendContext } =
-                await this.connection.getLatestBlockhashAndContext('processed');
-
-            logger.info('实际发送交易使用的区块信息:', {
-                blockhash: sendBlockhash,
-                lastValidBlockHeight: sendValidHeight,
-                slot: sendContext.slot,
-                commitment: 'processed',
-                timestamp: new Date().toISOString()
-            });
-
-            // 更新交易的区块信息
-            buyTx.recentBlockhash = sendBlockhash;
-            buyTx.lastValidBlockHeight = sendValidHeight - 150; // 减少 150 个区块的有效期
-            buyTx.feePayer = buyer.publicKey;
-
-            // 10. 发送交易
-            let signature;
-            if (options.usePriorityFee && options.priorityType === 'Jito') {
-                const bundleId =await jitoService.sendBundle(buyTx);
-                let signature;
-                const beforeTimestamp = Date.now();
-                // 等待一段时间以确保交易已完成
-                await new Promise(resolve => setTimeout(resolve, 2000));
-
-                // 获取最近的交易签名
-                const signatures = await this.connection.getSignaturesForAddress(
-                    buyer.publicKey,
-                    { limit: 5 }
-                );
-
-                // 找到在发送交易后的签名
-                const recentSignature = signatures.find(sig =>
-                    sig.blockTime * 1000 > beforeTimestamp
-                )?.signature;
-
-                if (recentSignature) {
-                    signature = recentSignature;
-                    logger.info('Retrieved actual signature for Jito transaction', {
-                        bundleId,
-                        signature
-                    });
-                }
-            } else {
-                signature = await sendAndConfirmTransaction(
-                    this.connection,
-                    buyTx,
-                    [buyer],
-                    {
-                        skipPreflight: false,
-                        preflightCommitment: 'processed', // 使用 processed 提交级别
-                        maxRetries: 5,
-                        commitment: 'confirmed'
-                    }
-                );
-            }
-
-            // 11. 返回结果
-            const result = {
-                signature,
-                txId: signature,
-                amount: buyAmountSol.toString(),
-                mint: mint.toString(),
-                owner: buyer.publicKey.toString(),
-                timestamp: new Date().toISOString(),
-                slippage: `${Number(slippageBasisPoints) / 100}%`,
-                status: 'success',
-                endpoint: this.connection.rpcEndpoint,
-                priorityFee: options.usePriorityFee ? {
-                    type: options.priorityType || 'jito',
-                    amount: priorityFees?.tipAmountSol
-                } : undefined,
-                simulation: {
-                    computeUnits: simulation.value.unitsConsumed || 0,
-                    fee: estimatedFee.value || 0
-                },
-                blockInfo: {
-                    blockhash: sendBlockhash,
-                    lastValidBlockHeight: sendValidHeight - 150,
-                    slot: sendContext.slot
-                }
-            };
-
-            logger.info('购买交易成功:', {
-                signature: result.signature,
+            // 2. 记录交易参数
+            logger.info('开始购买代币:', {
                 buyer: buyer.publicKey.toString(),
                 mint: mint.toString(),
-                amount: buyAmountSol.toString(),
-                endpoint: this.connection.rpcEndpoint,
-                priorityFee: result.priorityFee,
-                simulation: result.simulation
+                buyAmountSol: buyAmountSol.toString(),
+                slippageBasisPoints: slippageBasisPoints.toString(),
+                options: {
+                    usePriorityFee: options.usePriorityFee,
+                    priorityType: options.priorityType,
+                    priorityFeeSol: options.priorityFeeSol,
+                    tipAmountSol: options.tipAmountSol
+                }
             });
 
-            return result;
-        });
-    } catch (error) {
-        logger.error('❌ 购买代币失败', {
-            error: error.message,
-            mint: mint.toString(),
-            amount: buyAmountSol.toString(),
-            slippage: `${Number(slippageBasisPoints) / 100}%`,
-            time: new Date().toISOString(),
-            endpoint: this.connection.rpcEndpoint
-        });
-        throw error;
+            return await this.withRetry(async () => {
+                // 3. 获取购买指令
+                let buyTransaction = new Transaction();
+                const buyTx = await super.getBuyInstructionsBySolAmount(
+                    buyer.publicKey,
+                    mint,
+                    buyAmountSol,
+                    slippageBasisPoints,
+                    'confirmed'
+                );
+                buyTransaction.add(buyTx);
+
+                // 6. 获取最新区块哈希
+                const { blockhash, lastValidBlockHeight } =
+                    await this.connection.getLatestBlockhash('confirmed');
+
+                // 7. 设置交易参数
+                buyTransaction.recentBlockhash = blockhash;
+                buyTransaction.feePayer = buyer.publicKey;
+                buyTransaction.lastValidBlockHeight = lastValidBlockHeight;
+
+                // 4. 处理优先上链
+                if (options.usePriorityFee) {
+                    if (options.priorityType === 'Jito') {
+                        jitoService = new JitoService(this.connection);
+                        await jitoService.initialize();
+                        buyTransaction = await jitoService.addTipToTransaction(buyTransaction, {
+                            tipAmountSol: options.tipAmountSol
+                        });
+                    } else {
+                        // 添加常规优先费用指令
+                        buyTransaction.add(
+                            ComputeBudgetProgram.setComputeUnitPrice({
+                                microLamports: options.priorityFeeSol ?
+                                    Math.floor(options.priorityFeeSol * LAMPORTS_PER_SOL / 1_000_000) :
+                                    100000 // 默认优先费用
+                            })
+                        );
+                    }
+                }
+                // 8. 模拟交易
+                logger.info('开始模拟交易...');
+                const simulation = await this.connection.simulateTransaction(
+                    buyTransaction,
+                    [buyer],
+                    {
+                        sigVerify: false,
+                        commitment: 'confirmed',
+                        replaceRecentBlockhash: true
+                    }
+                );
+
+                // 9. 分析模拟结果
+                if (simulation.value.err) {
+                    const logs = simulation.value.logs || [];
+                    logger.error('交易模拟失败:', {
+                        error: simulation.value.err,
+                        logs,
+                        mint: mint.toString(),
+                        buyer: buyer.publicKey.toString()
+                    });
+
+                    if (logs.some(log => log.includes('Bonding curve account not found'))) {
+                        throw new Error(`Token ${mint.toString()} is not a valid pump token`);
+                    }
+                    if (logs.some(log => log.includes('insufficient funds'))) {
+                        throw new Error('Insufficient funds for transaction');
+                    }
+                    throw new Error(`Transaction simulation failed: ${simulation.value.err}`);
+                }
+
+                // 10. 计算预估费用并检查余额
+                const estimatedFee = await this.connection.getFeeForMessage(
+                    buyTransaction.compileMessage(),
+                    'confirmed'
+                );
+
+                const balance = await this.connection.getBalance(buyer.publicKey);
+                const totalRequired = buyAmountSol + BigInt(estimatedFee.value || 0);
+                if (BigInt(balance) < totalRequired) {
+                    throw new Error(`Insufficient balance. Required: ${totalRequired}, Current: ${balance}`);
+                }
+
+                logger.info('交易模拟成功:', {
+                    computeUnits: simulation.value.unitsConsumed || 0,
+                    estimatedFee: estimatedFee.value || 0,
+                    logs: simulation.value.logs
+                });
+
+                // 11. 发送交易
+                let signature;
+                if (options.usePriorityFee && options.priorityType === 'Jito') {
+                    const bundleResult = await jitoService.sendBundle([buyTransaction]);
+                    const beforeTime = Date.now();
+
+                    // 等待交易确认并获取签名
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+
+                    const signatures = await this.connection.getSignaturesForAddress(
+                        buyer.publicKey,
+                        { limit: 5 }
+                    );
+
+                    signature = signatures.find(sig =>
+                        sig.blockTime * 1000 > beforeTime
+                    )?.signature;
+
+                    if (!signature) {
+                        throw new Error('Failed to get Jito transaction signature');
+                    }
+
+                    logger.info('Jito transaction sent:', {
+                        bundleId: bundleResult.bundleId,
+                        signature
+                    });
+                } else {
+                    signature = await this.connection.sendTransaction(
+                        buyTransaction,
+                        [buyer],
+                        {
+                            skipPreflight: false,
+                            preflightCommitment: 'processed',
+                            maxRetries: options.retryCount || 5,
+                            commitment: 'confirmed'
+                        }
+                    );
+                }
+
+                // 12. 等待交易确认
+                const confirmation = await Promise.race([
+                    this.connection.confirmTransaction(
+                        {
+                            signature,
+                            blockhash,
+                            lastValidBlockHeight
+                        },
+                        'confirmed'
+                    ),
+                    new Promise((_, reject) =>
+                        setTimeout(
+                            () => reject(new Error('Transaction confirmation timeout')),
+                            options.timeout || 60000
+                        )
+                    )
+                ]);
+
+                if (confirmation.value.err) {
+                    throw new Error(`Transaction failed: ${confirmation.value.err}`);
+                }
+
+                // 13. 返回结果
+                const result = {
+                    signature,
+                    txId: signature,
+                    amount: buyAmountSol.toString(),
+                    mint: mint.toString(),
+                    owner: buyer.publicKey.toString(),
+                    timestamp: new Date().toISOString(),
+                    slippage: `${Number(slippageBasisPoints) / 100}%`,
+                    status: 'success',
+                    endpoint: this.connection.rpcEndpoint,
+                    duration: Date.now() - startTime,
+                    priorityFee: options.usePriorityFee ? {
+                        type: options.priorityType || 'normal',
+                        amount: options.priorityFeeSol || options.tipAmountSol
+                    } : undefined,
+                    simulation: {
+                        computeUnits: simulation.value.unitsConsumed || 0,
+                        fee: estimatedFee.value || 0
+                    }
+                };
+
+                logger.info('购买交易成功:', {
+                    signature: result.signature,
+                    buyer: buyer.publicKey.toString(),
+                    mint: mint.toString(),
+                    amount: buyAmountSol.toString(),
+                    duration: result.duration
+                });
+
+                return result;
+
+            });
+        } catch (error) {
+            // 清理资源
+            if (jitoService) {
+                await jitoService.cleanup().catch(e =>
+                    logger.warn('清理 Jito service 失败:', e)
+                );
+            }
+
+            // 记录错误
+            logger.error('购买代币失败:', {
+                error: error.message,
+                stack: error.stack,
+                buyer: buyer?.publicKey?.toString(),
+                mint: mint?.toString(),
+                amount: buyAmountSol?.toString(),
+                duration: Date.now() - startTime
+            });
+
+            throw error;
+        }
     }
-}
 
     async initializeProvider(seller) {
         try {
@@ -2012,117 +2030,151 @@ async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, o
     // customPumpSDK.js (sell 相关部分)
     // In CustomPumpSDK class
     async sell(seller, mint, sellTokenAmount, slippageBasisPoints = 100n, priorityFees, options = {}) {
+        let jitoService = null;
+        const startTime = Date.now();
+
         try {
+            // 1. 将卖出金额转换为负数 BigInt
+            const tokenAmountBigInt = typeof sellTokenAmount === 'bigint' ?
+                -sellTokenAmount : -BigInt(sellTokenAmount.toString());
+            const slippagePointsBigInt = typeof slippageBasisPoints === 'bigint' ?
+                slippageBasisPoints : BigInt(slippageBasisPoints.toString());
+
+            // 2. 创建基础交易实例
+            let sellTransaction = new Transaction();
+
+            logger.info('开始卖出代币:', {
+                seller: seller.publicKey.toString(),
+                mint: mint.toString(),
+                amount: tokenAmountBigInt.toString(),
+                slippage: slippagePointsBigInt.toString()
+            });
+
+            // 3. 检查代币余额
+            const tokenBalance = await this.getTokenBalance(seller.publicKey, mint);
+            if (BigInt(tokenBalance) < BigInt(sellTokenAmount)) {
+                throw new Error(`Insufficient token balance. Required: ${sellTokenAmount}, Available: ${tokenBalance}`);
+            }
+
             return await this.withRetry(async () => {
-                // 确保转换为 BigInt
-                const tokenAmountBigInt = typeof sellTokenAmount === 'bigint' ?
-                    sellTokenAmount : BigInt(sellTokenAmount.toString());
-                const slippagePointsBigInt = typeof slippageBasisPoints === 'bigint' ?
-                    slippageBasisPoints : BigInt(slippageBasisPoints.toString());
-
-                // 获取 bonding curve 账户以检查状态
-                const bondingCurveAccount = await this.getBondingCurveAccount(mint);
-                if (!bondingCurveAccount) {
-                    throw new Error(`Bonding curve account not found: ${mint.toString()}`);
-                }
-
-                // 使用 SDK 的卖出指令方法
-                let sellTx = await super.getSellInstructionsByTokenAmount(
+                // 4. 获取卖出指令并添加到交易中
+                const sellIx = await super.getSellInstructionsByTokenAmount(
                     seller.publicKey,
                     mint,
-                    tokenAmountBigInt,
+                    sellTokenAmount,
                     slippagePointsBigInt,
                     'confirmed'
                 );
+                sellTransaction.add(sellIx);
 
+                // 5. 设置基础交易参数
+                const { blockhash, lastValidBlockHeight } =
+                    await this.connection.getLatestBlockhash('confirmed');
+                sellTransaction.recentBlockhash = blockhash;
+                sellTransaction.lastValidBlockHeight = lastValidBlockHeight;
+                sellTransaction.feePayer = seller.publicKey;
 
+                // 6. 添加优先费用（如果需要）
                 if (options.usePriorityFee) {
                     if (options.priorityType === 'Jito') {
-                        const jitoService = new JitoService(this.connection);
+                        jitoService = new JitoService(this.connection);
                         await jitoService.initialize();
-                        sellTx = await jitoService.addTipToTransaction(sellTx, {
+                        sellTransaction = await jitoService.addTipToTransaction(sellTransaction, {
                             tipAmountSol: options.tipAmountSol
                         });
                     } else {
-                        sellTx.add(
+                        sellTransaction.add(
                             ComputeBudgetProgram.setComputeUnitPrice({
                                 microLamports: priorityFees.microLamports
                             })
                         );
                     }
                 }
-                // 获取最新的区块哈希
-                const { blockhash, lastValidBlockHeight } =
-                    await this.connection.getLatestBlockhash('confirmed');
 
-                sellTx.recentBlockhash = blockhash;
-                sellTx.lastValidBlockHeight = lastValidBlockHeight;
-                sellTx.feePayer = seller.publicKey;
-
-                logger.info('卖出交易构建成功:', {
-                    seller: seller.publicKey.toString(),
-                    mint: mint.toString(),
-                    amount: tokenAmountBigInt.toString(),
-                    slippage: slippagePointsBigInt.toString()
-                });
-
+                // 7. 发送交易
                 let signature;
                 if (options.usePriorityFee && options.priorityType === 'Jito') {
-                    const bundleId =await jitoService.sendBundle(buyTx);
-                    let signature;
+                    const bundleResult = await jitoService.sendBundle([sellTransaction]);
                     const beforeTimestamp = Date.now();
-                    // 等待一段时间以确保交易已完成
+
                     await new Promise(resolve => setTimeout(resolve, 2000));
 
-                    // 获取最近的交易签名
                     const signatures = await this.connection.getSignaturesForAddress(
-                        buyer.publicKey,
+                        seller.publicKey,
                         { limit: 5 }
                     );
 
-                    // 找到在发送交易后的签名
-                    const recentSignature = signatures.find(sig =>
+                    signature = signatures.find(sig =>
                         sig.blockTime * 1000 > beforeTimestamp
                     )?.signature;
 
-                    if (recentSignature) {
-                        signature = recentSignature;
-                        logger.info('Retrieved actual signature for Jito transaction', {
-                            bundleId,
-                            signature
-                        });
+                    if (!signature) {
+                        throw new Error('Failed to get Jito transaction signature');
                     }
-                } else{
-                signature = await sendAndConfirmTransaction(
-                    this.connection,
-                    sellTx,
-                    [seller],
-                    {
-                        skipPreflight: false,
-                        preflightCommitment: 'processed',
-                        commitment: 'confirmed',
-                        maxRetries: 3
-                    }
-                );
+
+                    logger.info('Jito transaction sent:', {
+                        bundleId: bundleResult.bundleId,
+                        signature
+                    });
+                } else {
+                    signature = await sendAndConfirmTransaction(
+                        this.connection,
+                        sellTransaction,
+                        [seller],
+                        {
+                            skipPreflight: false,
+                            preflightCommitment: 'processed',
+                            commitment: 'confirmed',
+                            maxRetries: 3
+                        }
+                    );
                 }
-                return {
+
+                // 8. 等待交易确认
+                await this.connection.confirmTransaction({
+                    signature,
+                    blockhash,
+                    lastValidBlockHeight
+                }, 'confirmed');
+
+                // 9. 返回结果
+                const result = {
+                    success: true,
                     signature,
                     txId: signature,
                     amount: tokenAmountBigInt.toString(),
                     mint: mint.toString(),
                     owner: seller.publicKey.toString(),
                     timestamp: new Date().toISOString(),
-                    endpoint: this.connection.rpcEndpoint
+                    duration: Date.now() - startTime
                 };
+
+                logger.info('卖出交易成功:', {
+                    signature,
+                    mint: mint.toString(),
+                    amount: tokenAmountBigInt.toString(),
+                    duration: result.duration
+                });
+
+                return result;
             });
         } catch (error) {
-            logger.error('❌ 卖出代币失败', {
+            // 清理 Jito service
+            if (jitoService) {
+                await jitoService.cleanup().catch(e =>
+                    logger.warn('清理 Jito service 失败:', e)
+                );
+            }
+
+            logger.error('卖出代币失败:', {
                 error: error.message,
-                mint: mint.toString(),
+                stack: error.stack,
+                seller: seller?.publicKey?.toString(),
+                mint: mint?.toString(),
                 amount: sellTokenAmount.toString(),
-                time: new Date().toISOString(),
-                endpoint: this.connection.rpcEndpoint
+                duration: Date.now() - startTime
             });
+
             throw error;
         }
     }

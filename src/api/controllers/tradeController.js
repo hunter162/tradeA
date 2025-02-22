@@ -153,9 +153,16 @@ export class TradeController {
                 accountNumber,
                 tokenAddress,
                 amountSol,
+                // 所有选项参数
                 slippage = 1.0,
                 usePriorityFee = false,
-                options = {}
+                priorityType = 'Jito',
+                priorityFeeSol,
+                tipAmountSol,
+                skipPreflight = false,
+                timeout = 60000,
+                retryCount = 3,
+                commitment = 'confirmed'
             } = req.body;
 
             logger.info('收到买入请求:', {
@@ -164,23 +171,78 @@ export class TradeController {
                 tokenAddress,
                 amountSol,
                 slippage,
-                usePriorityFee
+                usePriorityFee,
+                priorityType
             });
 
+            // 1. 验证必要参数
+            if (!groupType || typeof groupType !== 'string') {
+                throw new Error('Invalid group type');
+            }
+
+            if (!accountNumber || typeof accountNumber !== 'number') {
+                throw new Error('Invalid account number');
+            }
+
+            if (!tokenAddress || typeof tokenAddress !== 'string') {
+                throw new Error('Invalid token address');
+            }
+            // 2. 验证优先费用
+            if (usePriorityFee && priorityFeeSol) {
+                if (typeof priorityFeeSol !== 'number' || priorityFeeSol < 0) {
+                    throw new Error('Invalid priority fee amount');
+                }
+            }
+
+            // 3. 验证滑点
+            if (typeof slippage !== 'number' || slippage < 0 || slippage > 100) {
+                throw new Error('Invalid slippage (must be between 0 and 100)');
+            }
+
+
+            // 封装所有选项到 options 对象
+            const options = {
+                slippage,
+                usePriorityFee,
+                priorityType,
+                priorityFeeSol,
+                tipAmountSol,
+                skipPreflight,
+                timeout,
+                retryCount,
+                commitment
+            };
+
+            // 调用 solanaService buyTokens 方法
             const result = await this.solanaService.buyTokens({
                 groupType,
                 accountNumber,
                 tokenAddress,
                 amountSol: parseFloat(amountSol),
-                slippage: parseFloat(slippage),
-                usePriorityFee,
                 options
             });
 
+            // 返回成功响应
             res.json({
                 success: true,
-                data: result
+                data: {
+                    signature: result.signature,
+                    transactionId: result.transactionId,
+                    requestParams: {
+                        groupType,
+                        accountNumber,
+                        tokenAddress,
+                        amountSol,
+                        options
+                    },
+                    result: {
+                        tokenAmount: result.tokenAmount,
+                        subscriptionId: result.subscriptionId,
+                        timestamp: new Date().toISOString()
+                    }
+                }
             });
+
         } catch (error) {
             logger.error('买入代币失败:', {
                 error: error.message,
@@ -190,7 +252,11 @@ export class TradeController {
 
             res.status(400).json({
                 success: false,
-                error: error.message
+                error: {
+                    message: error.message,
+                    code: error.code || 'BUY_ERROR',
+                    requestParams: req.body
+                }
             });
         }
     }
@@ -203,14 +269,27 @@ export class TradeController {
                 accountNumber,
                 tokenAddress,
                 percentage,
-                slippage = 1.0,          // 默认滑点 1%
-                usePriorityFee = false,  // 是否使用优先费
-                priorityFeeSol,          // 优先费用金额(SOL)
-                priorityType = 'Jito',   // 优先费类型: 'jito' 或 'nozomi'
-                skipPreflight = false,   // 是否跳过预检
-                maxRetries = 3,          // 最大重试次数
-                options = {}             // 其他选项
+                // 所有选项参数
+                slippage = 1.0,
+                usePriorityFee = false,
+                priorityType = 'Jito',
+                priorityFeeSol,
+                tipAmountSol,
+                skipPreflight = false,
+                timeout = 60000,
+                maxRetries = 3,
+                commitment = 'confirmed'
             } = req.body;
+
+            logger.info('收到卖出请求:', {
+                groupType,
+                accountNumber,
+                tokenAddress,
+                percentage,
+                slippage,
+                usePriorityFee,
+                priorityType
+            });
 
             // 1. 验证必要参数
             if (!groupType || typeof groupType !== 'string') {
@@ -241,79 +320,60 @@ export class TradeController {
                 throw new Error('Invalid slippage (must be between 0 and 100)');
             }
 
-            // 4. 记录请求信息
-            logger.info('收到卖出请求:', {
-                groupType,
-                accountNumber,
-                tokenAddress: tokenAddress.toString(),
-                percentage,
+            // 封装所有选项到 options 对象
+            const options = {
                 slippage,
                 usePriorityFee,
                 priorityType,
-                priorityFeeSol
-            });
-
-            // 5. 合并所有选项
-            const tradeOptions = {
-                ...options,
-                slippage,                // 滑点百分比
-                usePriorityFee,         // 是否使用优先费
-                priorityFeeSol,         // 优先费金额
-                priorityType,           // 优先费类型
-                skipPreflight,         // 是否跳过预检
-                maxRetries            // 最大重试次数
+                priorityFeeSol,
+                tipAmountSol,
+                skipPreflight,
+                timeout,
+                maxRetries,
+                commitment
             };
 
-            // 6. 调用 tokenTradeService 执行卖出
-            const result = await this.tokenTradeService.sellTokens(
+            // 调用 solanaService sellTokens 方法
+            const result = await this.solanaService.sellTokens(
                 groupType,
                 accountNumber,
                 tokenAddress,
                 percentage,
-                tradeOptions
+                options
             );
-
-            // 7. 根据结果构造响应
             res.json({
                 success: true,
                 data: {
-                    ...result,
+                    signature: result.signature,
+                    transactionId: result.transactionId,
                     requestParams: {
                         groupType,
                         accountNumber,
                         tokenAddress,
                         percentage,
-                        slippage,
-                        usePriorityFee,
-                        priorityType,
-                        priorityFeeSol
+                        options
+                    },
+                    result: {
+                        amount: result.amount,
+                        newBalance: result.newBalance,
+                        timestamp: new Date().toISOString()
                     }
                 }
             });
 
         } catch (error) {
-            // 8. 错误处理和日志记录
             logger.error('卖出代币失败:', {
                 error: error.message,
-                params: {
-                    groupType: req.body.groupType,
-                    accountNumber: req.body.accountNumber,
-                    tokenAddress: req.body.tokenAddress,
-                    percentage: req.body.percentage
-                },
-                stack: error.stack
+                stack: error.stack,
+                params: req.body
             });
 
-            // 9. 返回错误响应
             res.status(400).json({
                 success: false,
-                error: error.message,
-                errorCode: error.code || 'SELL_ERROR',
-                requestParams: {
-                    groupType: req.body.groupType,
-                    accountNumber: req.body.accountNumber,
-                    tokenAddress: req.body.tokenAddress,
-                    percentage: req.body.percentage
+                error: {
+                    message: error.message,
+                    code: error.code || 'SELL_ERROR',
+                    requestParams: req.body
                 }
             });
         }

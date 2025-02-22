@@ -720,13 +720,13 @@ export class SolanaService {
 
     async buyTokens({ groupType, accountNumber, tokenAddress, amountSol, slippage, usePriorityFee, options }) {
         try {
-            // 1. 获取钱包
+            // 1. Get wallet
             const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
             if (!wallet) {
                 throw new Error(`Wallet not found: ${groupType}-${accountNumber}`);
             }
 
-            // 2. 转换参数
+            // 2. Convert parameters
             const buyAmountSol = BigInt(Math.floor(amountSol * LAMPORTS_PER_SOL));
             const slippageBasisPoints = BigInt(Math.floor(slippage * 100));
 
@@ -737,12 +737,12 @@ export class SolanaService {
                 slippage,
             });
 
-            // 3. 直接使用 SDK 的 buy 方法
+            // 3. Execute buy transaction using SDK
             const result = await this.sdk.buy(
-                wallet,  // Keypair
-                new PublicKey(tokenAddress),  // PublicKey
-                buyAmountSol,  // BigInt
-                slippageBasisPoints,  // BigInt
+                wallet,
+                new PublicKey(tokenAddress),
+                buyAmountSol,
+                slippageBasisPoints,
                 usePriorityFee,
                 {
                     usePriorityFee: options.usePriorityFee,
@@ -754,14 +754,72 @@ export class SolanaService {
                 }
             );
 
-            logger.info('代币购买成功:', {
-                signature: result.signature,
-                tokenAddress,
-                amountSol,
-                wallet: wallet.publicKey.toString()
-            });
+            // 4. Start database transaction
+            const dbTransaction = await db.sequelize.transaction();
 
-            return result;
+            try {
+                // 5. Save transaction to database
+                const txRecord = await db.models.Transaction.create({
+                    signature: result.signature,
+                    mint: tokenAddress,
+                    owner: wallet.publicKey.toString(),
+                    type: 'buy',
+                    amount: amountSol.toString(),
+                    tokenAmount: result.tokenAmount?.toString(),
+                    status: 'success',
+                    groupType,
+                    accountNumber,
+                    raw: {
+                        ...result,
+                        timestamp: new Date().toISOString()
+                    }
+                }, { transaction: dbTransaction });
+
+                // 6. Update account balances with transaction
+                await this.updateAccountBalances(
+                    wallet,
+                    new PublicKey(tokenAddress),
+                    result.tokenAmount,
+                    amountSol,
+                    { transaction: dbTransaction }
+                );
+
+                // 7. Setup token tracking and WebSocket subscription
+                const subscriptionId = await this.subscribeToTokenBalance(
+                    wallet.publicKey,
+                    tokenAddress
+                );
+
+                // 8. Setup token tracking
+                await this.setupTokenTracking(
+                    wallet.publicKey.toString(),
+                    tokenAddress,
+                    result.tokenAmount || '0'
+                );
+
+                // Commit transaction
+                await dbTransaction.commit();
+
+                logger.info('代币购买成功:', {
+                    signature: result.signature,
+                    tokenAddress,
+                    amountSol,
+                    wallet: wallet.publicKey.toString(),
+                    subscriptionId
+                });
+
+                return {
+                    ...result,
+                    subscriptionId,
+                    transactionId: txRecord.id
+                };
+
+            } catch (error) {
+                // Rollback transaction on error
+                await dbTransaction.rollback();
+                throw error;
+            }
+
         } catch (error) {
             logger.error('购买代币失败:', {
                 error: error.message,
@@ -776,94 +834,159 @@ export class SolanaService {
 
     // In SolanaService class
     async sellTokens(groupType, accountNumber, tokenAddress, percentage, options = {}) {
+        let keypair;
+        let dbTransaction = null;
+
         try {
+            // 1. 清理代币地址
+            const cleanTokenAddress = tokenAddress.trim();
             logger.info('开始卖出代币:', {
                 groupType,
                 accountNumber,
-                tokenAddress,
-                percentage
+                tokenAddress: cleanTokenAddress,
+                percentage,
+                options
             });
 
-            // 1. Get wallet keypair
-            const keypair = await this.walletService.getWalletKeypair(groupType, accountNumber);
+            // 2. 获取钱包
+            keypair = await this.walletService.getWalletKeypair(groupType, accountNumber);
             if (!keypair) {
-                throw new Error('Failed to get wallet keypair');
+                throw new Error('Wallet not found');
             }
 
-            // 2. Get token balance
-            const tokenAccount = await getAssociatedTokenAddress(
-                new PublicKey(tokenAddress),
-                keypair.publicKey
-            );
+            // 3. 获取代币信息和余额(复用 getTokenInfo 和 getTokenBalance)
+            const [tokenInfo, tokenBalance] = await Promise.all([
+                this.getTokenInfo(cleanTokenAddress),
+                this.getTokenBalance(keypair.publicKey, cleanTokenAddress)
+            ]);
 
-            const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount);
-            if (!tokenBalance?.value) {
-                throw new Error('Failed to get token balance');
+            // 4. 计算卖出数量(使用 BN 进行安全计算)
+            const rawBalanceBN = new BN(tokenBalance.toString());
+            const precisionBN = new BN(1_000_000);
+            const percentageBN = new BN(Math.round((percentage/100) * 1_000_000));
+            const sellAmount = rawBalanceBN.mul(percentageBN).div(precisionBN);
+
+            // 5. 验证卖出数量
+            if (sellAmount.lte(new BN(0))) {
+                throw new Error('Invalid sell amount (zero or negative)');
+            }
+            if (sellAmount.gt(rawBalanceBN)) {
+                throw new Error(`Insufficient balance. Have: ${rawBalanceBN.toString()}, Need: ${sellAmount.toString()}`);
             }
 
-            // 3. Calculate sell amount based on percentage
-            const sellAmount = BigInt(Math.floor(
-                Number(tokenBalance.value.amount) * (percentage / 100)
-            ));
+            // 6. 开始数据库事务
+            dbTransaction = await db.sequelize.transaction();
 
-            if (sellAmount <= 0n) {
-                throw new Error('Invalid sell amount');
+            try {
+                // 7. 设置 SDK 参数
+                const slippageBasisPoints = options.slippage ?
+                    BigInt(Math.round(options.slippage * 100)) : 100n;
+                const priorityFees = options.usePriorityFee ? {
+                    microLamports: Math.floor(options.priorityFeeSol * 1e6)
+                } : undefined;
+
+                // 8. 执行卖出交易(使用 SDK 的 sell 方法)
+                const result = await this.sdk.sell(
+                    keypair,
+                    new PublicKey(cleanTokenAddress),
+                    sellAmount,
+                    slippageBasisPoints,
+                    priorityFees,
+                    options
+                );
+
+                // 9. 获取新的余额(复用 getTokenBalance)
+                const newTokenBalance = await this.getTokenBalance(
+                    keypair.publicKey,
+                    cleanTokenAddress
+                );
+
+                // 10. 记录交易到数据库
+                const txRecord = await db.models.Transaction.create({
+                    signature: result.signature,
+                    mint: cleanTokenAddress,
+                    owner: keypair.publicKey.toString(),
+                    type: 'sell',
+                    amount: sellAmount.toString(),
+                    tokenAmount: sellAmount.toString(),
+                    status: 'success',
+                    groupType,
+                    accountNumber,
+                    raw: {
+                        ...result,
+                        requestedPercentage: percentage,
+                        timestamp: new Date().toISOString()
+                    }
+                }, { transaction: dbTransaction });
+
+                // 11. 更新余额(复用 updateAccountBalances)
+                await this.updateAccountBalances(
+                    keypair,
+                    new PublicKey(cleanTokenAddress),
+                    newTokenBalance,
+                    result.solAmount,
+                    { transaction: dbTransaction }
+                );
+
+                // 12. 更新代币跟踪(复用 setupTokenTracking)
+                await this.setupTokenTracking(
+                    keypair.publicKey.toString(),
+                    cleanTokenAddress,
+                    newTokenBalance
+                );
+
+                // 13. 提交事务
+                await dbTransaction.commit();
+
+                return {
+                    success: true,
+                    signature: result.signature,
+                    txId: result.txId,
+                    transactionId: txRecord.id,
+                    requestedPercentage: percentage,
+                    actualPercentage: (Number(percentageBN.toString()) * 100) / 1_000_000,
+                    amount: sellAmount.toString(),
+                    newBalance: newTokenBalance.toString(),
+                    owner: keypair.publicKey.toString(),
+                    mint: cleanTokenAddress,
+                    timestamp: new Date().toISOString()
+                };
+
+            } catch (error) {
+                // 回滚数据库事务
+                if (dbTransaction) await dbTransaction.rollback();
+                throw error;
             }
-
-            // 4. Create a new provider with the wallet
-            const provider = new AnchorProvider(
-                this.connection,
-                new Wallet(keypair),
-                {
-                    commitment: 'confirmed',
-                    preflightCommitment: 'confirmed',
-                    skipPreflight: false
-                }
-            );
-
-            // 5. Create a new SDK instance with the provider
-            const sdkWithWallet = new CustomPumpSDK(provider);
-            sdkWithWallet.setSolanaService(this);
-
-            // 6. Call SDK's sell method
-            const result = await sdkWithWallet.sell(
-                keypair,
-                new PublicKey(tokenAddress),
-                sellAmount,
-                BigInt(options.slippage || 100),
-                options.priorityFeeSol ? {
-                    tipAmountSol: options.priorityFeeSol
-                } : undefined,
-                {
-                    usePriorityFee: options.usePriorityFee,
-                    priorityType: options.priorityType,
-                    deadline: options.deadline || 60
-                }
-            );
-
-            logger.info('代币卖出成功:', {
-                signature: result.signature,
-                wallet: keypair.publicKey.toString(),
-                token: tokenAddress,
-                amount: sellAmount.toString(),
-                percentage: `${percentage}%`
-            });
-
-            return result;
 
         } catch (error) {
             logger.error('卖出代币失败:', {
                 error: error.message,
                 tokenAddress,
-                params: {
-                    groupType,
-                    accountNumber,
-                    percentage,
-                    options
-                },
-                stack: error.stack
+                percentage,
+                stack: error.stack,
+                options
             });
             throw error;
+        }
+    }
+    _parseTokenBalance(balance) {
+        try {
+            if (typeof balance === 'string' || typeof balance === 'number') {
+                return BigInt(balance.toString());
+            }
+            if (balance?.value?.amount) {
+                return BigInt(balance.value.amount);
+            }
+            if (BN.isBN(balance)) {
+                return BigInt(balance.toString());
+            }
+            throw new Error(`Invalid token balance format: ${typeof balance}`);
+        } catch (error) {
+            logger.error('解析代币余额失败:', {
+                balance: balance?.toString?.() || balance,
+                type: typeof balance
+            });
+            throw new Error(`Failed to parse token balance: ${error.message}`);
         }
     }
 
