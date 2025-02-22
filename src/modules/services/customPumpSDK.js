@@ -713,7 +713,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             const transactions = [];
 
             // 1. 创建主交易 (create + buy)
-            const mainTransaction = new Transaction();
+            let mainTransaction = new Transaction();
 
             // 创建代币元数据
             const tokenMetadata = await this.createTokenMetadata(metadata);
@@ -751,18 +751,19 @@ export class CustomPumpSDK extends PumpFunSDK {
                     initialBuyPriceBigInt,
                     buyAmountWithSlippage
                 );
-
+                // 设置主交易参数
+                mainTransaction.recentBlockhash = blockhash;
+                mainTransaction.lastValidBlockHeight = lastValidBlockHeight;
+                mainTransaction.feePayer = creator.publicKey;
+                mainTransaction.add(buyIx);
                 // 添加 Jito tip
-                const buyIxWithTip = await jitoService.addTipToTransaction(buyIx, {
+                mainTransaction = await jitoService.addTipToTransaction(mainTransaction, {
                     tipAmountSol: options.tipAmountSol
                 });
-                mainTransaction.add(buyIxWithTip);
+
             }
 
-            // 设置主交易参数
-            mainTransaction.recentBlockhash = blockhash;
-            mainTransaction.lastValidBlockHeight = lastValidBlockHeight;
-            mainTransaction.feePayer = creator.publicKey;
+
 
             // 添加主交易到交易数组
             transactions.push({
@@ -778,7 +779,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                         batchTx.accountNumber
                     );
 
-                    const batchTransaction = new Transaction();
+                    let batchTransaction = new Transaction();
                     const batchAmountLamports = this._solToLamports(batchTx.solAmount);
                     const batchBuyPriceBigInt = this._ensureBigInt(
                         globalAccount.getInitialBuyPrice(batchAmountLamports)
@@ -795,15 +796,16 @@ export class CustomPumpSDK extends PumpFunSDK {
                         batchBuyPriceBigInt,
                         batchAmountWithSlippage
                     );
-
-                    const buyIxWithTip = await jitoService.addTipToTransaction(buyIx, {
-                        tipAmountSol: options.tipAmountSol
-                    });
-                    batchTransaction.add(buyIxWithTip);
-
                     batchTransaction.recentBlockhash = blockhash;
                     batchTransaction.lastValidBlockHeight = lastValidBlockHeight;
                     batchTransaction.feePayer = batchWallet.publicKey;
+
+                    batchTransaction.add(buyIx);
+                    batchTransaction = await jitoService.addTipToTransaction(batchTransaction, {
+                        tipAmountSol: options.tipAmountSol
+                    });
+
+
 
                     transactions.push({
                         transaction: batchTransaction,
@@ -815,8 +817,20 @@ export class CustomPumpSDK extends PumpFunSDK {
             // 3. 签名所有交易
             const signedTransactions = await Promise.all(
                 transactions.map(async ({ transaction, signers }) => {
-                    // 所有签名者签名
-                    transaction.sign(...signers);
+                    // 在签名前验证签名者
+                    const validSigners = signers.filter(signer =>
+                        signer && signer.publicKey && typeof signer.publicKey.toBase58 === 'function'
+                    );
+
+                    if (validSigners.length !== signers.length) {
+                        logger.error('检测到无效的签名者:', {
+                            预期数量: signers.length,
+                            有效数量: validSigners.length
+                        });
+                        throw new Error('检测到无效的签名者格式');
+                    }
+                    // 现在使用验证过的签名者进行签名
+                    transaction.sign(...validSigners);
                     return transaction;
                 })
             );
@@ -825,9 +839,14 @@ export class CustomPumpSDK extends PumpFunSDK {
             const bundleResult = await jitoService.sendBundle(signedTransactions);
 
             // 存储所有签名
-            const signatures = signedTransactions.map(tx =>
-                tx.signatures[0].signature?.toString()
-            );
+            const signatures = signedTransactions.map(tx => {
+                const sigBytes = tx.signatures[0].signature;
+                if (sigBytes) {
+                    // 将Buffer转换为十六进制字符串
+                    return Buffer.from(sigBytes).toString('hex');
+                }
+                return null;
+            });
 
             // 获取主交易的签名（第一个交易）
             const mainSignature = signatures[0];
