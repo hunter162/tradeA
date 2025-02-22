@@ -191,7 +191,10 @@ router.post('/tokens/create-and-buy',
                 solAmount,
                 slippageBasisPoints = 100,
                 usePriorityFee = false,
-                priorityFeeSol
+                priorityFeeSol,
+                options={
+                    batchTransactions: []
+                }
             } = req.body;
 
             logger.info('创建代币请求:', {
@@ -210,7 +213,15 @@ router.post('/tokens/create-and-buy',
             if (!metadata.name || !metadata.symbol) {
                 throw new Error('Token metadata must include name and symbol');
             }
-
+            // 验证批量交易参数
+            if (options.batchTransactions && Array.isArray(options.batchTransactions)) {
+                // 验证每个批量交易的参数
+                options.batchTransactions.forEach((tx, index) => {
+                    if (!tx.groupType || !tx.accountNumber || !tx.solAmount) {
+                        throw new Error(`Invalid parameters in batch transaction at index ${index}`);
+                    }
+                });
+            }
             const { solanaService } = req.app.locals.services;
 
             // 构造正确的参数对象
@@ -229,7 +240,12 @@ router.post('/tokens/create-and-buy',
                 options: {
                     slippageBasisPoints: parseInt(slippageBasisPoints),
                     usePriorityFee,
-                    priorityFeeSol: priorityFeeSol ? parseFloat(priorityFeeSol) : undefined
+                    priorityFeeSol: priorityFeeSol ? parseFloat(priorityFeeSol) : undefined,
+                    batchTransactions: options.batchTransactions.map(tx => ({
+                        groupType: tx.groupType,
+                        accountNumber: tx.accountNumber,
+                        solAmount: parseFloat(tx.solAmount)
+                    }))
                 }
             };
 

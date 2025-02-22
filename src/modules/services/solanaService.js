@@ -28,7 +28,6 @@ import {
     TOKEN_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID
 } from "@solana/spl-token";
-import { JitoService } from './jitoService.js';
 import bs58 from 'bs58';
 import { SOLANA_CONFIG } from '../../config/solana.js';
 import { RedisService } from './redisService.js';
@@ -1753,6 +1752,9 @@ export class SolanaService {
                 },
                 solAmount
             });
+            if (options.batchTransactions && options.batchTransactions.length > 4) {
+                throw new Error('Maximum 4 batch transactions allowed');
+            }
 
             // 1. 验证输入参数
             if (!solAmount || solAmount <= 0) {
@@ -1859,6 +1861,29 @@ export class SolanaService {
                 }
             });
 
+            // 8. 记录批量交易（如果有）
+            if (result.batchResults?.length > 0) {
+                await Promise.all(
+                    result.batchResults.map(batchResult =>
+                        db.models.Transaction.create({
+                            signature: batchResult.signature,
+                            mint: result.mint,
+                            owner: wallet.publicKey.toString(),
+                            type: 'batch_buy',
+                            amount: batchResult.solAmount,
+                            status: batchResult.status,
+                            groupType: batchResult.groupType,
+                            accountNumber: batchResult.accountNumber,
+                            raw: {
+                                ...batchResult,
+                                parentSignature: result.signature,
+                                timestamp: new Date().toISOString()
+                            }
+                        })
+                    )
+                );
+            }
+
             // 10. 设置代币追踪
             await this.setupTokenTracking(
                 wallet.publicKey.toString(),
@@ -1877,11 +1902,48 @@ export class SolanaService {
 
             // 12. 初始化 WebSocket 订阅
             await this.subscribeToTokenBalance(wallet.publicKey, result.mint);
+            if (result.batchResults?.length > 0) {
+                await Promise.all(
+                    result.batchResults.map(async (batchResult) => {
+                        // 获取批量交易的钱包
+                        const batchWallet = await this.walletService.getWalletKeypair(
+                            batchResult.groupType,
+                            batchResult.accountNumber
+                        );
 
-            logger.info('代币创建和购买成功:', {
+                        // 设置代币追踪
+                        await this.setupTokenTracking(
+                            batchWallet.publicKey.toString(),
+                            result.mint,
+                            batchResult.tokenAmount || '0'
+                        );
+
+                        // 设置代币余额订阅
+                        await this.subscribeToTokenBalance(
+                            batchWallet.publicKey,
+                            result.mint
+                        );
+
+                        logger.info('批量交易代币追踪已设置:', {
+                            wallet: batchWallet.publicKey.toString(),
+                            mint: result.mint,
+                            groupType: batchResult.groupType,
+                            accountNumber: batchResult.accountNumber
+                        });
+                    })
+                );
+            }
+
+            logger.info('代币创建和批量购买完成:', {
                 mint: result.mint,
-                signature: result.signature,
-                solAmount: solAmount.toString()
+                mainSignature: result.signature,
+                batchCount: result.batchResults?.length || 0,
+                subscribedAccounts: [
+                    wallet.publicKey.toString(),
+                    ...(result.batchResults?.map(br =>
+                        `${br.groupType}-${br.accountNumber}`
+                    ) || [])
+                ]
             });
 
             return {

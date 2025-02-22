@@ -158,17 +158,19 @@ export class SolanaController {
                 slippageBasisPoints = 100,
                 usePriorityFee = false,
                 priorityFeeSol,
-                options = {}
+                options = {
+                    batchTransactions: []
+                }
             } = req.body;
 
-            // 1. 验证参数
+            // 1. 基础参数验证
             if (!groupType || !accountNumber || !metadata || !solAmount) {
                 throw new Error('Missing required parameters');
             }
 
             // 2. 验证 metadata
-            if (!metadata.name || !metadata.symbol || !metadata.image) {
-                throw new Error('Token metadata must include name, symbol and image');
+            if (!metadata.name || !metadata.symbol) {
+                throw new Error('Token metadata must include name and symbol');
             }
 
             // 3. 验证优先费
@@ -178,15 +180,27 @@ export class SolanaController {
                 }
             }
 
-            // 4. 创建代币和执行买入操作
-            const result = await this.solanaService.createAndBuy({
+            // 4. 验证批量交易参数
+            if (options.batchTransactions && Array.isArray(options.batchTransactions)) {
+                options.batchTransactions.forEach((tx, index) => {
+                    if (!tx.groupType || !tx.accountNumber || !tx.solAmount) {
+                        throw new Error(`Invalid parameters in batch transaction at index ${index}`);
+                    }
+                    if (parseFloat(tx.solAmount) < 0.000001) {
+                        throw new Error(`Invalid solAmount in batch transaction at index ${index}`);
+                    }
+                });
+            }
+
+            // 5. 构造服务层参数
+            const serviceParams = {
                 groupType,
                 accountNumber,
                 metadata: {
                     name: metadata.name,
                     symbol: metadata.symbol,
                     description: metadata.description || '',
-                    image: metadata.image,
+                    image: metadata.image || '',
                     external_url: metadata.external_url || '',
                     attributes: metadata.attributes || []
                 },
@@ -195,11 +209,23 @@ export class SolanaController {
                     slippageBasisPoints: parseInt(slippageBasisPoints),
                     usePriorityFee,
                     priorityFeeSol: priorityFeeSol ? parseFloat(priorityFeeSol) : undefined,
-                    ...options
+                    batchTransactions: options.batchTransactions?.map(tx => ({
+                        groupType: tx.groupType,
+                        accountNumber: tx.accountNumber,
+                        solAmount: parseFloat(tx.solAmount)
+                    })) || []
                 }
+            };
+
+            // 6. 调用服务层创建和购买代币
+            logger.info('开始创建和购买代币:', {
+                params: serviceParams,
+                batchCount: serviceParams.options.batchTransactions.length
             });
 
-            // 5. 保存交易记录
+            const result = await this.solanaService.createAndBuy(serviceParams);
+
+            // 7. 保存主交易记录
             await this.tokenTradeService.saveTradeTransaction({
                 signature: result.signature,
                 mint: result.mint,
@@ -216,7 +242,32 @@ export class SolanaController {
                 }
             }, { transaction });
 
-            // 6. 更新缓存和订阅
+            // 8. 保存批量交易记录
+            if (options.batchTransactions?.length > 0) {
+                const batchTransactionResults = result.batchResults || [];
+                await Promise.all(batchTransactionResults.map((txResult, index) => {
+                    const batchTx = options.batchTransactions[index];
+                    return this.tokenTradeService.saveTradeTransaction({
+                        signature: txResult.signature,
+                        mint: result.mint, // 使用主交易创建的代币地址
+                        owner: txResult.owner,
+                        type: 'batch_create_and_buy',
+                        amount: batchTx.solAmount,
+                        tokenAmount: txResult.tokenAmount,
+                        tokenDecimals: result.tokenDecimals || 9,
+                        metadata: {
+                            name: metadata.name,
+                            symbol: metadata.symbol,
+                            uri: metadata.uri,
+                            batchIndex: index,
+                            parentSignature: result.signature,
+                            ...txResult
+                        }
+                    }, { transaction });
+                }));
+            }
+
+            // 9. 更新缓存和订阅
             await Promise.all([
                 this.solanaService.updateBalanceCache(result.owner, result.mint),
                 this.solanaService.tokenSubscriptionService?.subscribeToTokenBalance(
@@ -225,15 +276,33 @@ export class SolanaController {
                 )
             ]);
 
+            // 如果有批量交易，也更新它们的缓存和订阅
+            if (result.batchResults?.length > 0) {
+                await Promise.all(
+                    result.batchResults.map(batchTx =>
+                        Promise.all([
+                            this.solanaService.updateBalanceCache(batchTx.owner, result.mint),
+                            this.solanaService.tokenSubscriptionService?.subscribeToTokenBalance(
+                                batchTx.owner,
+                                result.mint
+                            )
+                        ])
+                    )
+                );
+            }
+
             await transaction.commit();
 
+            // 10. 返回成功响应
             res.json({
                 success: true,
                 data: {
                     ...result,
-                    metadata
+                    metadata,
+                    batchTransactions: result.batchResults
                 }
             });
+
         } catch (error) {
             await transaction.rollback();
             logger.error('创建并买入代币失败:', {
@@ -242,6 +311,7 @@ export class SolanaController {
                 params: req.body
             });
 
+            // 11. 返回错误响应
             res.status(400).json({
                 success: false,
                 error: error.message,
@@ -265,7 +335,7 @@ export class SolanaController {
             const buyOptions = {
                 slippageBasisPoints: parseInt(slippageBasisPoints),
                 usePriorityFee: options.usePriorityFee || false,
-                priorityType: options.priorityType || 'nozomi', // 'jito' or 'nozomi'
+                priorityType: options.priorityType || 'Jito', // 'jito' or 'nozomi'
                 priorityFeeSol: options.priorityFeeSol ? parseFloat(options.priorityFeeSol) : undefined,
                 tipAmountSol: options.tipAmountSol, // For Jito bundles
                 timeout: options.timeout || 60000,

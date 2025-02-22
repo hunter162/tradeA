@@ -21,7 +21,7 @@ import {
     TOKEN_PROGRAM_ID
 } from '@solana/spl-token';
 import BN from 'bn.js';
-import {JitoService, NOZOMI_CONFIG} from './jitoService.js';
+import {JitoService} from './jitoService_new.js';
 import axios from 'axios';
 import {WebSocketManager} from './webSocketManager.js';
 import idlModule from 'pumpdotfun-sdk/dist/cjs/IDL/index.js';
@@ -204,37 +204,6 @@ export class CustomPumpSDK extends PumpFunSDK {
         this.TOKEN_PROGRAM_ID = TOKEN_PROGRAM_ID;
         this.ASSOCIATED_TOKEN_PROGRAM_ID = ASSOCIATED_TOKEN_PROGRAM_ID;
         this.PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-    }
-    // 在 CustomPumpSDK 类顶部添加账户大小定义
-
-    async sendTransactionViaNozomi(transaction, signers, config) {
-        try {
-            // 签名交易
-            transaction.sign(...signers);
-
-            // 发送到 Nozomi
-            const response = await axios.post(
-                `${config.URL}/v1/tx`,
-                {
-                    tx: transaction.serialize().toString('base64'),
-                    uuid: config.UUID
-                },
-                {
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                }
-            );
-
-            if (response.data.error) {
-                throw new Error(`Nozomi error: ${response.data.error}`);
-            }
-
-            return response.data.signature;
-        } catch (error) {
-            logger.error('Nozomi 发送交易失败:', error);
-            throw error;
-        }
     }
 
 // 修改 createProgram 方法
@@ -722,22 +691,34 @@ export class CustomPumpSDK extends PumpFunSDK {
             if (!mint?.publicKey) throw new Error('Invalid mint keypair');
             if (!metadata?.name || !metadata?.symbol) throw new Error('Invalid metadata');
 
+            if (options.batchTransactions && options.batchTransactions.length > 4) {
+                throw new Error('Maximum 4 batch transactions allowed');
+            }
+
             logger.info('开始创建和购买代币:', {
                 creator: creator.publicKey.toString(),
                 mint: mint.publicKey.toString(),
                 buyAmount: typeof buyAmountSol === 'bigint' ? buyAmountSol.toString() : buyAmountSol
             });
 
-            // 1. 创建代币元数据
+            // 初始化 Jito 服务
+            const jitoService = new JitoService(this.connection);
+            await jitoService.initialize();
+
+            // 获取最新的 blockhash
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('confirmed');
+
+            // 准备交易数组
+            const transactions = [];
+
+            // 1. 创建主交易 (create + buy)
+            const mainTransaction = new Transaction();
+
+            // 创建代币元数据
             const tokenMetadata = await this.createTokenMetadata(metadata);
 
-            // 2. 转换购买金额为 lamports (BigInt)
-            const buyAmountLamports = this._solToLamports(buyAmountSol);
-
-            // 3. 构建交易
-            const transaction = new SolanaTransaction();
-
-            // 4. 添加创建指令
+            // 添加创建指令
             const createIx = await this.getCreateInstructions(
                 creator.publicKey,
                 metadata.name,
@@ -745,20 +726,20 @@ export class CustomPumpSDK extends PumpFunSDK {
                 tokenMetadata.metadataUri,
                 mint
             );
-            transaction.add(createIx);
+            mainTransaction.add(createIx);
 
-            // 5. 如果购买金额大于0，添加购买指令
-            if (buyAmountLamports>=(new BN(0))) {
-                const globalAccount = await this.getGlobalAccount();
+            // 转换购买金额为 lamports
+            const buyAmountLamports = this._solToLamports(buyAmountSol);
+            const globalAccount = await this.getGlobalAccount();
+            const slippageBasisPoints = this._ensureBigInt(options.slippageBasisPoints || 100);
 
-                // 确保使用 BigInt 进行价格计算
+            // 如果购买金额大于0，添加购买指令
+            if (buyAmountLamports >= (new BN(0))) {
                 const initialBuyPriceBigInt = this._ensureBigInt(
                     globalAccount.getInitialBuyPrice(buyAmountLamports)
                 );
 
-                // 计算带滑点的金额
-                const slippageBasisPoints = this._ensureBigInt(options.slippageBasisPoints || 100);
-                const buyAmountWithSlippage =await this.calculateWithSlippageBuy(
+                const buyAmountWithSlippage = await this.calculateWithSlippageBuy(
                     initialBuyPriceBigInt,
                     slippageBasisPoints
                 );
@@ -768,39 +749,90 @@ export class CustomPumpSDK extends PumpFunSDK {
                     mint.publicKey,
                     globalAccount.feeRecipient,
                     initialBuyPriceBigInt,
-                     buyAmountWithSlippage
+                    buyAmountWithSlippage
                 );
-                transaction.add(buyIx);
 
-                logger.debug('购买指令已添加:', {
-                    initialPrice: initialBuyPriceBigInt.toString(),
-                    withSlippage: buyAmountWithSlippage.toString(),
-                    slippage: `${slippageBasisPoints.toString()} basis points`
+                // 添加 Jito tip
+                const buyIxWithTip = await jitoService.addTipToTransaction(buyIx, {
+                    tipAmountSol: options.tipAmountSol
                 });
+                mainTransaction.add(buyIxWithTip);
             }
 
-            // 6. 获取最新的 blockhash
-            const { blockhash, lastValidBlockHeight } =
-                await this.connection.getLatestBlockhash('confirmed');
+            // 设置主交易参数
+            mainTransaction.recentBlockhash = blockhash;
+            mainTransaction.lastValidBlockHeight = lastValidBlockHeight;
+            mainTransaction.feePayer = creator.publicKey;
 
-            transaction.recentBlockhash = blockhash;
-            transaction.lastValidBlockHeight = lastValidBlockHeight;
-            transaction.feePayer = creator.publicKey;
+            // 添加主交易到交易数组
+            transactions.push({
+                transaction: mainTransaction,
+                signers: [creator, mint]
+            });
 
-            // 7. 发送交易
-            const signature = await this.sendTransactionWithLogs(
-                this.connection,
-                transaction,
-                [creator, mint],
-                {
-                    skipPreflight: false,
-                    preflightCommitment: 'confirmed',
-                    commitment: 'confirmed',
-                    maxRetries: 3
+            // 2. 处理批量交易
+            if (options.batchTransactions?.length > 0) {
+                for (const batchTx of options.batchTransactions) {
+                    const batchWallet = await this.walletService.getWalletKeypair(
+                        batchTx.groupType,
+                        batchTx.accountNumber
+                    );
+
+                    const batchTransaction = new Transaction();
+                    const batchAmountLamports = this._solToLamports(batchTx.solAmount);
+                    const batchBuyPriceBigInt = this._ensureBigInt(
+                        globalAccount.getInitialBuyPrice(batchAmountLamports)
+                    );
+                    const batchAmountWithSlippage = await this.calculateWithSlippageBuy(
+                        batchBuyPriceBigInt,
+                        slippageBasisPoints
+                    );
+
+                    const buyIx = await this.getBuyInstructions(
+                        batchWallet.publicKey,
+                        mint.publicKey,
+                        globalAccount.feeRecipient,
+                        batchBuyPriceBigInt,
+                        batchAmountWithSlippage
+                    );
+
+                    const buyIxWithTip = await jitoService.addTipToTransaction(buyIx, {
+                        tipAmountSol: options.tipAmountSol
+                    });
+                    batchTransaction.add(buyIxWithTip);
+
+                    batchTransaction.recentBlockhash = blockhash;
+                    batchTransaction.lastValidBlockHeight = lastValidBlockHeight;
+                    batchTransaction.feePayer = batchWallet.publicKey;
+
+                    transactions.push({
+                        transaction: batchTransaction,
+                        signers: [batchWallet]
+                    });
                 }
+            }
+
+            // 3. 签名所有交易
+            const signedTransactions = await Promise.all(
+                transactions.map(async ({ transaction, signers }) => {
+                    // 所有签名者签名
+                    transaction.sign(...signers);
+                    return transaction;
+                })
             );
 
-            // 8. 获取代币余额
+            // 4. 发送交易bundle
+            const bundleResult = await jitoService.sendBundle(signedTransactions);
+
+            // 存储所有签名
+            const signatures = signedTransactions.map(tx =>
+                tx.signatures[0].signature?.toString()
+            );
+
+            // 获取主交易的签名（第一个交易）
+            const mainSignature = signatures[0];
+
+            // 5. 获取代币余额
             const tokenAccount = await this.findAssociatedTokenAddress(
                 creator.publicKey,
                 mint.publicKey
@@ -814,10 +846,12 @@ export class CustomPumpSDK extends PumpFunSDK {
                 logger.warn('获取代币余额失败:', error);
             }
 
-            // 9. 返回标准化的响应
+            // 6. 返回结果
             const result = {
                 success: true,
-                signature,
+                signature: mainSignature,
+                bundleId: bundleResult.bundleId,
+                allSignatures: signatures,
                 mint: mint.publicKey.toString(),
                 creator: creator.publicKey.toString(),
                 tokenAmount,
@@ -831,7 +865,8 @@ export class CustomPumpSDK extends PumpFunSDK {
             };
 
             logger.info('代币创建和购买成功:', {
-                signature,
+                signature: mainSignature,
+                bundleId: bundleResult.bundleId,
                 mint: result.mint,
                 tokenAmount
             });
@@ -1512,9 +1547,10 @@ async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, o
 
             // 3. 处理优先上链
             if (options.usePriorityFee) {
-                if (options.priorityType === 'nozomi') {
+                if (options.priorityType === 'Jito') {
                     const jitoService = new JitoService(this.connection);
-                    buyTx = await jitoService.addPriorityFee(buyTx, {
+                    await jitoService.initialize();
+                    buyTx = await jitoService.addTipToTransaction(buyTx, {
                         tipAmountSol: options.tipAmountSol
                     });
                 } else {
@@ -1603,12 +1639,31 @@ async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, o
 
             // 10. 发送交易
             let signature;
-            if (options.usePriorityFee && options.priorityType === 'nozomi') {
-                signature = await this.sendTransactionViaNozomi(
-                    buyTx,
-                    [buyer],
-                    NOZOMI_CONFIG
+            if (options.usePriorityFee && options.priorityType === 'Jito') {
+                const bundleId =await jitoService.sendBundle(buyTx);
+                let signature;
+                const beforeTimestamp = Date.now();
+                // 等待一段时间以确保交易已完成
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                // 获取最近的交易签名
+                const signatures = await this.connection.getSignaturesForAddress(
+                    buyer.publicKey,
+                    { limit: 5 }
                 );
+
+                // 找到在发送交易后的签名
+                const recentSignature = signatures.find(sig =>
+                    sig.blockTime * 1000 > beforeTimestamp
+                )?.signature;
+
+                if (recentSignature) {
+                    signature = recentSignature;
+                    logger.info('Retrieved actual signature for Jito transaction', {
+                        bundleId,
+                        signature
+                    });
+                }
             } else {
                 signature = await sendAndConfirmTransaction(
                     this.connection,
@@ -1674,36 +1729,6 @@ async buy(buyer, mint, buyAmountSol, slippageBasisPoints = 100n, priorityFees, o
     }
 }
 
-// 添加通过 Nozomi 发送交易的方法
-async sendTransactionViaNozomi(transaction, signers, config) {
-    try {
-        // 签名交易
-        transaction.sign(...signers);
-
-        // 发送到 Nozomi
-        const response = await axios.post(
-            `${config.URL}/v1/tx`,
-            {
-                tx: transaction.serialize().toString('base64'),
-                uuid: config.UUID
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-
-        if (response.data.error) {
-            throw new Error(`Nozomi error: ${response.data.error}`);
-        }
-
-        return response.data.signature;
-    } catch (error) {
-        logger.error('Nozomi 发送交易失败:', error);
-        throw error;
-    }
-}
     async initializeProvider(seller) {
         try {
             if (!seller || !seller.publicKey) {
@@ -1961,15 +1986,22 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     'confirmed'
                 );
 
-                // 添加优先费用指令（如果需要）
-                if (priorityFees?.microLamports) {
-                    sellTx.add(
-                        ComputeBudgetProgram.setComputeUnitPrice({
-                            microLamports: priorityFees.microLamports
-                        })
-                    );
-                }
 
+                if (options.usePriorityFee) {
+                    if (options.priorityType === 'Jito') {
+                        const jitoService = new JitoService(this.connection);
+                        await jitoService.initialize();
+                        sellTx = await jitoService.addTipToTransaction(sellTx, {
+                            tipAmountSol: options.tipAmountSol
+                        });
+                    } else {
+                        sellTx.add(
+                            ComputeBudgetProgram.setComputeUnitPrice({
+                                microLamports: priorityFees.microLamports
+                            })
+                        );
+                    }
+                }
                 // 获取最新的区块哈希
                 const { blockhash, lastValidBlockHeight } =
                     await this.connection.getLatestBlockhash('confirmed');
@@ -1985,8 +2017,34 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                     slippage: slippagePointsBigInt.toString()
                 });
 
-                // 发送交易
-                const signature = await sendAndConfirmTransaction(
+                let signature;
+                if (options.usePriorityFee && options.priorityType === 'Jito') {
+                    const bundleId =await jitoService.sendBundle(buyTx);
+                    let signature;
+                    const beforeTimestamp = Date.now();
+                    // 等待一段时间以确保交易已完成
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+
+                    // 获取最近的交易签名
+                    const signatures = await this.connection.getSignaturesForAddress(
+                        buyer.publicKey,
+                        { limit: 5 }
+                    );
+
+                    // 找到在发送交易后的签名
+                    const recentSignature = signatures.find(sig =>
+                        sig.blockTime * 1000 > beforeTimestamp
+                    )?.signature;
+
+                    if (recentSignature) {
+                        signature = recentSignature;
+                        logger.info('Retrieved actual signature for Jito transaction', {
+                            bundleId,
+                            signature
+                        });
+                    }
+                } else{
+                signature = await sendAndConfirmTransaction(
                     this.connection,
                     sellTx,
                     [seller],
@@ -1997,7 +2055,7 @@ async sendTransactionViaNozomi(transaction, signers, config) {
                         maxRetries: 3
                     }
                 );
-
+                }
                 return {
                     signature,
                     txId: signature,

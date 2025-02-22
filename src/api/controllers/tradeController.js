@@ -206,7 +206,7 @@ export class TradeController {
                 slippage = 1.0,          // 默认滑点 1%
                 usePriorityFee = false,  // 是否使用优先费
                 priorityFeeSol,          // 优先费用金额(SOL)
-                priorityType = 'jito',   // 优先费类型: 'jito' 或 'nozomi'
+                priorityType = 'Jito',   // 优先费类型: 'jito' 或 'nozomi'
                 skipPreflight = false,   // 是否跳过预检
                 maxRetries = 3,          // 最大重试次数
                 options = {}             // 其他选项

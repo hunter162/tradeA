@@ -3,7 +3,7 @@ import { WalletService } from './walletService.js';
 import { CustomPumpSDK } from './customPumpSDK.js';
 import { WebSocketManager } from './webSocketManager.js';
 import { RedisService } from './redisService.js';
-import { JitoService } from './jitoService.js';
+import { JitoService } from './jitoService_new.js';  //
 import { PinataService } from './pinataService.js';
 import { TokenSubscriptionService } from './tokenSubscriptionService.js';
 import { TransferService } from './transferService.js';
