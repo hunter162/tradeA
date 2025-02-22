@@ -25,6 +25,7 @@ import {JitoService} from './jitoService_new.js';
 import axios from 'axios';
 import {WebSocketManager} from './webSocketManager.js';
 import idlModule from 'pumpdotfun-sdk/dist/cjs/IDL/index.js';
+import bs58 from "bs58";
 
 const require = createRequire(import.meta.url);
 const {PumpFunSDK, GlobalAccount} = pkg;
@@ -774,10 +775,7 @@ export class CustomPumpSDK extends PumpFunSDK {
             // 2. 处理批量交易
             if (options.batchTransactions?.length > 0) {
                 for (const batchTx of options.batchTransactions) {
-                    const batchWallet = await this.walletService.getWalletKeypair(
-                        batchTx.groupType,
-                        batchTx.accountNumber
-                    );
+                    const batchWallet = batchTx.wallet;
 
                     let batchTransaction = new Transaction();
                     const batchAmountLamports = this._solToLamports(batchTx.solAmount);
@@ -842,8 +840,8 @@ export class CustomPumpSDK extends PumpFunSDK {
             const signatures = signedTransactions.map(tx => {
                 const sigBytes = tx.signatures[0].signature;
                 if (sigBytes) {
-                    // 将Buffer转换为十六进制字符串
-                    return Buffer.from(sigBytes).toString('hex');
+                    // 将签名 Buffer 转换为 base58 字符串
+                    return bs58.encode(sigBytes);
                 }
                 return null;
             });
@@ -864,7 +862,38 @@ export class CustomPumpSDK extends PumpFunSDK {
             } catch (error) {
                 logger.warn('获取代币余额失败:', error);
             }
+            const batchResults = [];
+            if (options.batchTransactions?.length > 0) {
+                for (let i = 0; i < signatures.length - 1; i++) { // 跳过第一个签名（主交易）
+                    const batchTx = options.batchTransactions[i];
+                    const batchSignature = signatures[i + 1];
 
+                    if (batchSignature) {
+                        // 获取代币余额
+                        const batchTokenAccount = await this.findAssociatedTokenAddress(
+                            batchTx.wallet.publicKey,
+                            mint.publicKey
+                        );
+
+                        let batchTokenAmount = '0';
+                        try {
+                            const balance = await this.connection.getTokenAccountBalance(batchTokenAccount);
+                            batchTokenAmount = balance.value.amount;
+                        } catch (error) {
+                            logger.warn('获取批量交易代币余额失败:', error);
+                        }
+
+                        batchResults.push({
+                            signature: batchSignature,
+                            tokenAmount: batchTokenAmount,
+                            solAmount: batchTx.solAmount.toString(),
+                            groupType: batchTx.groupType,
+                            accountNumber: batchTx.accountNumber,
+                            timestamp: Date.now()
+                        });
+                    }
+                }
+            }
             // 6. 返回结果
             const result = {
                 success: true,
@@ -880,7 +909,8 @@ export class CustomPumpSDK extends PumpFunSDK {
                     symbol: metadata.symbol,
                     uri: tokenMetadata.metadataUri
                 },
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                batchResults: batchResults.length > 0 ? batchResults : undefined
             };
 
             logger.info('代币创建和购买成功:', {
