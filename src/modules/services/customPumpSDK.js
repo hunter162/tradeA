@@ -2976,4 +2976,480 @@ cleanup()
         }
         throw lastError;
     }
+    async batchBuy(operations) {
+        try {
+            logger.info('开始处理批量买入操作:', {
+                operationCount: operations.length
+            });
+
+            // 参数验证
+            if (!Array.isArray(operations) || operations.length === 0) {
+                throw new Error('Invalid operations array');
+            }
+
+            const results = [];
+            const BUNDLE_MAX_SIZE = 5;
+            let currentBundle = [];
+            let currentBundleSize = 0;
+            let currentBlockhash = null;
+
+            // 创建单个JitoService实例
+            const jitoService = new JitoService(this.connection);
+            await jitoService.initialize();
+
+            for (const op of operations) {
+                try {
+                    const {
+                        wallet,
+                        mint,
+                        amountSol,
+                        tipAmountSol = 0,
+                        options = {}
+                    } = op;
+
+                    // 验证必要参数
+                    if (!wallet?.publicKey || !mint || !amountSol) {
+                        throw new Error('Missing required parameters');
+                    }
+
+                    // 当bundle满了或是新bundle时获取新的blockhash
+                    if (currentBundleSize >= BUNDLE_MAX_SIZE || currentBundleSize === 0) {
+                        // 处理当前bundle
+                        if (currentBundle.length > 0) {
+                            const bundleResult = await jitoService.sendBundle(currentBundle);
+                            const signatures = await Promise.all(
+                                currentBundle.map(tx => jitoService.getTransactionSignature(tx))
+                            );
+
+                            for (let i = 0; i < signatures.length; i++) {
+                                results.push({
+                                    success: true,
+                                    wallet: currentBundle[i].feePayer.toString(),
+                                    signature: signatures[i],
+                                    bundleId: bundleResult.bundleId
+                                });
+                            }
+
+                            currentBundle = [];
+                            currentBundleSize = 0;
+                        }
+
+                        // 获取新的blockhash
+                        const { blockhash, lastValidBlockHeight } =
+                            await this.connection.getLatestBlockhash('confirmed');
+                        currentBlockhash = { blockhash, lastValidBlockHeight };
+                    }
+
+                    // 创建买入交易
+                    let buyTransaction = new Transaction();
+                    const buyIx = await this.getBuyInstructionsBySolAmount(
+                        wallet.publicKey,
+                        mint,
+                        BigInt(Math.floor(amountSol * LAMPORTS_PER_SOL)),
+                        BigInt(options.slippageBasisPoints || 100),
+                        'confirmed'
+                    );
+                    buyTransaction.add(buyIx);
+
+                    // 设置交易参数
+                    buyTransaction.recentBlockhash = currentBlockhash.blockhash;
+                    buyTransaction.feePayer = wallet.publicKey;
+                    buyTransaction.lastValidBlockHeight = currentBlockhash.lastValidBlockHeight;
+
+                    // 添加优先费用
+                    if (tipAmountSol > 0) {
+                        buyTransaction = await jitoService.addTipToTransaction(buyTransaction, {
+                            tipAmountSol
+                        });
+                    }
+
+                    // 签名交易
+                    buyTransaction.sign(wallet);
+
+                    // 添加到当前bundle
+                    currentBundle.push(buyTransaction);
+                    currentBundleSize++;
+
+                } catch (error) {
+                    results.push({
+                        success: false,
+                        wallet: op.wallet?.publicKey?.toString() || 'unknown',
+                        error: error.message
+                    });
+                }
+            }
+
+            // 处理最后一个不完整的bundle
+            if (currentBundle.length > 0) {
+                try {
+                    const bundleResult = await jitoService.sendBundle(currentBundle);
+                    const signatures = await Promise.all(
+                        currentBundle.map(tx => jitoService.getTransactionSignature(tx))
+                    );
+
+                    for (let i = 0; i < signatures.length; i++) {
+                        results.push({
+                            success: true,
+                            wallet: currentBundle[i].feePayer.toString(),
+                            signature: signatures[i],
+                            bundleId: bundleResult.bundleId
+                        });
+                    }
+                } catch (error) {
+                    for (const tx of currentBundle) {
+                        results.push({
+                            success: false,
+                            wallet: tx.feePayer.toString(),
+                            error: error.message
+                        });
+                    }
+                }
+            }
+
+            // 清理JitoService
+            await jitoService.cleanup().catch(e =>
+                logger.warn('清理 Jito service 失败:', e)
+            );
+
+            return results;
+
+        } catch (error) {
+            logger.error('批量买入处理失败:', {
+                error: error.message,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
+
+    async batchSell(operations) {
+        try {
+            logger.info('开始处理批量卖出操作:', {
+                operationCount: operations.length
+            });
+
+            // 参数验证
+            if (!Array.isArray(operations) || operations.length === 0) {
+                throw new Error('Invalid operations array');
+            }
+
+            const results = [];
+            const BUNDLE_MAX_SIZE = 5;
+            let currentBundle = [];
+            let currentBundleSize = 0;
+            let currentBlockhash = null;
+
+            // 创建单个JitoService实例
+            const jitoService = new JitoService(this.connection);
+            await jitoService.initialize();
+
+            for (const op of operations) {
+                try {
+                    const {
+                        wallet,
+                        mint,
+                        tokenAmount,
+                        tipAmountSol = 0,
+                        options = {}
+                    } = op;
+
+                    // 验证必要参数
+                    if (!wallet?.publicKey || !mint || !tokenAmount) {
+                        throw new Error('Missing required parameters');
+                    }
+
+                    // 当bundle满了或是新bundle时获取新的blockhash
+                    if (currentBundleSize >= BUNDLE_MAX_SIZE || currentBundleSize === 0) {
+                        // 处理当前bundle
+                        if (currentBundle.length > 0) {
+                            const bundleResult = await jitoService.sendBundle(currentBundle);
+                            const signatures = await Promise.all(
+                                currentBundle.map(tx => tx.signatures[0].signature)
+                            );
+
+                            for (let i = 0; i < signatures.length; i++) {
+                                results.push({
+                                    success: true,
+                                    wallet: currentBundle[i].feePayer.toString(),
+                                    signature: bs58.encode(signatures[i]),
+                                    bundleId: bundleResult.bundleId
+                                });
+                            }
+
+                            currentBundle = [];
+                            currentBundleSize = 0;
+                        }
+
+                        // 获取新的blockhash
+                        const { blockhash, lastValidBlockHeight } =
+                            await this.connection.getLatestBlockhash('confirmed');
+                        currentBlockhash = { blockhash, lastValidBlockHeight };
+                    }
+
+                    // 获取当前代币余额进行验证
+                    const tokenBalance = await this.getTokenBalance(wallet.publicKey, mint);
+                    if (BigInt(tokenBalance) < BigInt(tokenAmount)) {
+                        throw new Error(`Insufficient token balance. Required: ${tokenAmount}, Available: ${tokenBalance}`);
+                    }
+
+                    // 创建卖出交易
+                    let sellTransaction = new Transaction();
+                    const sellIx = await this.getSellInstructionsByTokenAmount(
+                        wallet.publicKey,
+                        mint,
+                        tokenAmount,
+                        BigInt(options.slippageBasisPoints || 100),
+                        'confirmed'
+                    );
+                    sellTransaction.add(sellIx);
+
+                    // 设置交易参数
+                    sellTransaction.recentBlockhash = currentBlockhash.blockhash;
+                    sellTransaction.feePayer = wallet.publicKey;
+                    sellTransaction.lastValidBlockHeight = currentBlockhash.lastValidBlockHeight;
+
+                    // 添加优先费用
+                    if (tipAmountSol > 0) {
+                        sellTransaction = await jitoService.addTipToTransaction(sellTransaction, {
+                            tipAmountSol
+                        });
+                    }
+
+                    // 签名交易
+                    sellTransaction.sign(wallet);
+
+                    // 添加到当前bundle
+                    currentBundle.push(sellTransaction);
+                    currentBundleSize++;
+
+                } catch (error) {
+                    results.push({
+                        success: false,
+                        wallet: op.wallet?.publicKey?.toString() || 'unknown',
+                        error: error.message
+                    });
+                }
+            }
+
+            // 处理最后一个不完整的bundle
+            if (currentBundle.length > 0) {
+                try {
+                    const bundleResult = await jitoService.sendBundle(currentBundle);
+                    const signatures = await Promise.all(
+                        currentBundle.map(tx => tx.signatures[0].signature)
+                    );
+
+                    for (let i = 0; i < signatures.length; i++) {
+                        results.push({
+                            success: true,
+                            wallet: currentBundle[i].feePayer.toString(),
+                            signature: bs58.encode(signatures[i]),
+                            bundleId: bundleResult.bundleId
+                        });
+                    }
+                } catch (error) {
+                    for (const tx of currentBundle) {
+                        results.push({
+                            success: false,
+                            wallet: tx.feePayer.toString(),
+                            error: error.message
+                        });
+                    }
+                }
+            }
+
+            // 清理JitoService
+            await jitoService.cleanup().catch(e =>
+                logger.warn('清理 Jito service 失败:', e)
+            );
+
+            return results;
+
+        } catch (error) {
+            logger.error('批量卖出处理失败:', {
+                error: error.message,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
+    async batchBuyAndSell(operations) {
+        try {
+            logger.info('开始处理批量买卖操作:', {
+                operationCount: operations.length
+            });
+
+            const results = [];
+            const BUNDLE_MAX_SIZE = 5;
+            let currentBundle = [];
+            let currentBundleSize = 0;
+            let currentBlockhash = null;
+
+            // 创建单个JitoService实例
+            const jitoService = new JitoService(this.connection);
+            await jitoService.initialize();
+
+            for (const op of operations) {
+                try {
+                    const {
+                        wallet,
+                        mint,
+                        amountSol,
+                        tipAmountSol = 0,
+                        options = {}
+                    } = op;
+
+                    // 验证必要参数
+                    if (!wallet?.publicKey || !mint || !amountSol) {
+                        throw new Error('Missing required parameters');
+                    }
+
+                    // 当bundle满了或是新bundle时获取新的blockhash
+                    if (currentBundleSize >= BUNDLE_MAX_SIZE || currentBundleSize === 0) {
+                        if (currentBundle.length > 0) {
+                            const bundleResult = await jitoService.sendBundle(currentBundle);
+                            const signatures = await Promise.all(
+                                currentBundle.map(tx => tx.signatures[0].signature)
+                            );
+
+                            for (let i = 0; i < signatures.length; i++) {
+                                results.push({
+                                    success: true,
+                                    wallet: currentBundle[i].feePayer.toString(),
+                                    signature: bs58.encode(signatures[i]),
+                                    bundleId: bundleResult.bundleId
+                                });
+                            }
+
+                            currentBundle = [];
+                            currentBundleSize = 0;
+                        }
+
+                        const { blockhash, lastValidBlockHeight } =
+                            await this.connection.getLatestBlockhash('confirmed');
+                        currentBlockhash = { blockhash, lastValidBlockHeight };
+                    }
+
+                    // 1. 先执行买入
+                    const buyAmountLamports = this._solToLamports(amountSol);
+                    let buyTransaction = new Transaction();
+                    const buyIx = await this.getBuyInstructionsBySolAmount(
+                        wallet.publicKey,
+                        mint,
+                        buyAmountLamports,
+                        BigInt(options.slippageBasisPoints || 100),
+                        'confirmed'
+                    );
+
+                    buyTransaction.add(buyIx);
+                    buyTransaction.recentBlockhash = currentBlockhash.blockhash;
+                    buyTransaction.feePayer = wallet.publicKey;
+                    buyTransaction.lastValidBlockHeight = currentBlockhash.lastValidBlockHeight;
+
+                    if (tipAmountSol > 0) {
+                        buyTransaction = await jitoService.addTipToTransaction(buyTransaction, {
+                            tipAmountSol
+                        });
+                    }
+
+                    buyTransaction.sign(wallet);
+                    currentBundle.push(buyTransaction);
+                    currentBundleSize++;
+
+                    // 等待买入交易确认后执行卖出
+                    if (currentBundleSize >= BUNDLE_MAX_SIZE) {
+                        const bundleResult = await jitoService.sendBundle(currentBundle);
+                        await new Promise(resolve => setTimeout(resolve, 2000)); // 等待交易确认
+
+                        // 获取新的代币余额
+                        const tokenBalance = await this.getTokenBalance(wallet.publicKey, mint);
+
+                        // 2. 执行卖出
+                        let sellTransaction = new Transaction();
+                        const sellIx = await this.getSellInstructionsByTokenAmount(
+                            wallet.publicKey,
+                            mint,
+                            tokenBalance,
+                            BigInt(options.slippageBasisPoints || 100),
+                            'confirmed'
+                        );
+
+                        const { blockhash, lastValidBlockHeight } =
+                            await this.connection.getLatestBlockhash('confirmed');
+
+                        sellTransaction.add(sellIx);
+                        sellTransaction.recentBlockhash = blockhash;
+                        sellTransaction.feePayer = wallet.publicKey;
+                        sellTransaction.lastValidBlockHeight = lastValidBlockHeight;
+
+                        if (tipAmountSol > 0) {
+                            sellTransaction = await jitoService.addTipToTransaction(sellTransaction, {
+                                tipAmountSol
+                            });
+                        }
+
+                        sellTransaction.sign(wallet);
+
+                        // 发送卖出交易
+                        const sellBundleResult = await jitoService.sendBundle([sellTransaction]);
+
+                        results.push({
+                            success: true,
+                            wallet: wallet.publicKey.toString(),
+                            buySignature: bundleResult.bundleId,
+                            sellSignature: sellBundleResult.bundleId
+                        });
+                    }
+
+                } catch (error) {
+                    results.push({
+                        success: false,
+                        wallet: op.wallet?.publicKey?.toString() || 'unknown',
+                        error: error.message
+                    });
+                }
+            }
+
+            // 处理最后一个不完整的bundle
+            if (currentBundle.length > 0) {
+                try {
+                    const bundleResult = await jitoService.sendBundle(currentBundle);
+                    const signatures = await Promise.all(
+                        currentBundle.map(tx => tx.signatures[0].signature)
+                    );
+
+                    for (let i = 0; i < signatures.length; i++) {
+                        results.push({
+                            success: true,
+                            wallet: currentBundle[i].feePayer.toString(),
+                            signature: bs58.encode(signatures[i]),
+                            bundleId: bundleResult.bundleId
+                        });
+                    }
+                } catch (error) {
+                    for (const tx of currentBundle) {
+                        results.push({
+                            success: false,
+                            wallet: tx.feePayer.toString(),
+                            error: error.message
+                        });
+                    }
+                }
+            }
+
+            // 清理JitoService
+            await jitoService.cleanup().catch(e =>
+                logger.warn('清理 Jito service 失败:', e)
+            );
+
+            return results;
+
+        } catch (error) {
+            logger.error('批量买卖处理失败:', {
+                error: error.message,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
 } 

@@ -381,6 +381,21 @@ export function createSolanaRoutes(solanaController) {
         })
     );
 
+    router.post('/tokens/batch-buy',
+        solanaValidators.batchBuy,
+        validateRequest,
+        async (req, res) => {
+            await req.solanaController.batchBuyTokens(req, res);
+        }
+    );
+
+    router.post('/calculate-fees',
+        solanaValidators.calculateFees,
+        validateRequest,
+        async (req, res) => {
+            await req.solanaController.calculateFees(req, res);
+        }
+    );
     return router;
 }
 

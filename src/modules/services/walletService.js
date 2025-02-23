@@ -1,11 +1,88 @@
 import {Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction} from '@solana/web3.js';
-import {getAccount, getMint, TOKEN_PROGRAM_ID} from '@solana/spl-token';
 import {EncryptionManager, logger} from '../utils/index.js';
 import db from '../db/index.js';
 import bs58 from 'bs58';
 import {CustomError} from '../utils/errors.js';
 import {ErrorCodes} from '../../constants/errorCodes.js';
 import {config} from '../../config/index.js';
+import {
+    getAccount,
+    TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    getAssociatedTokenAddress,
+    createAssociatedTokenAccountInstruction,
+    createTransferInstruction,
+    getMint
+} from '@solana/spl-token';
+// 交易限制配置
+const TRANSACTION_LIMITS = {
+    MAX_INSTRUCTIONS: 12,            // Solana推荐每个交易的最大指令数
+    TRANSACTION_SIZE: 1232,          // 最大交易大小(bytes)
+    SOL_TRANSFER_SIZE: 96,           // SOL转账指令大小
+    TOKEN_TRANSFER_SIZE: 450,        // Token转账指令大小（包含ATA创建）
+    BASE_TRANSACTION_SIZE: 100       // 基础交易大小
+};
+
+// 不同规模配置
+const SCALE_CONFIG = {
+    SMALL: {
+        maxSize: 20,
+        instructionsPerTx: 6,     // 每笔交易6条指令
+        maxConcurrent: 2          // 并发2个交易
+    },
+    MEDIUM: {
+        maxSize: 100,
+        instructionsPerTx: 8,     // 每笔交易8条指令
+        maxConcurrent: 3          // 并发3个交易
+    },
+    LARGE: {
+        maxSize: 500,
+        instructionsPerTx: 10,    // 每笔交易10条指令
+        maxConcurrent: 4          // 并发4个交易
+    },
+    XLARGE: {
+        maxSize: 1000,
+        instructionsPerTx: 12,    // 每笔交易12条指令
+        maxConcurrent: 5          // 并发5个交易
+    }
+};
+const BATCH_CLOSE_CONFIG = {
+    SMALL: {
+        maxSize: 20,
+        batchSize: 4,         // 每批4个账户
+        concurrentBatches: 1, // 串行处理
+        retryAttempts: 3,
+        delayBetweenBatches: 1000  // 1秒
+    },
+    MEDIUM: {
+        maxSize: 50,
+        batchSize: 10,        // 每批10个账户
+        concurrentBatches: 2, // 并发2个批次
+        retryAttempts: 3,
+        delayBetweenBatches: 1500
+    },
+    LARGE: {
+        maxSize: 100,
+        batchSize: 20,        // 每批20个账户
+        concurrentBatches: 2,
+        retryAttempts: 3,
+        delayBetweenBatches: 2000
+    },
+    XLARGE: {
+        maxSize: 500,
+        batchSize: 25,        // 每批25个账户
+        concurrentBatches: 4,
+        retryAttempts: 3,
+        delayBetweenBatches: 2000
+    },
+    XXLARGE: {
+        maxSize: 1000,
+        batchSize: 50,        // 每批50个账户
+        concurrentBatches: 4,
+        retryAttempts: 3,
+        delayBetweenBatches: 2500
+    }
+};
 
 export class WalletService {
     constructor(solanaService) {
@@ -38,6 +115,348 @@ export class WalletService {
             logger.error('钱包服务初始化失败:', error);
             throw error;
         }
+    }
+
+    _getScaleConfig(transferCount) {
+        if (transferCount <= 4) return SCALE_CONFIG.SMALL;
+        if (transferCount <= 50) return SCALE_CONFIG.MEDIUM;
+        if (transferCount <= 100) return SCALE_CONFIG.LARGE;
+        if (transferCount <= 500) return SCALE_CONFIG.XLARGE;
+        return SCALE_CONFIG.XXLARGE;
+    }
+
+    /**
+     * 计算每个交易可以包含的最大指令数
+     */
+    _calculateMaxInstructions(isToken) {
+        const instructionSize = isToken ?
+            TRANSACTION_LIMITS.TOKEN_TRANSFER_SIZE :
+            TRANSACTION_LIMITS.SOL_TRANSFER_SIZE;
+
+        const maxBySize = Math.floor(
+            (TRANSACTION_LIMITS.TRANSACTION_SIZE - TRANSACTION_LIMITS.BASE_TRANSACTION_SIZE) /
+            instructionSize
+        );
+
+        return Math.min(maxBySize, TRANSACTION_LIMITS.MAX_INSTRUCTIONS);
+    }
+
+    /**
+     * 批量转账主方法
+     */
+    async batchTransfer({
+                            fromType,
+                            fromRange,
+                            toType,
+                            toRange,
+                            amount,
+                            mintAddress = null, // token转账时提供
+                            transferType = 'oneToMany'
+                        }) {
+        try {
+            // 解析账户范围
+            const fromAccounts = this._parseAccountRange(fromRange);
+            const toAccounts = this._parseAccountRange(toRange);
+
+            // 获取转账参数
+            const transferParams = await this._prepareTransferParams({
+                fromAccounts,
+                toAccounts,
+                amount,
+                mintAddress,
+                transferType
+            });
+
+            // 创建交易批次
+            const batches = this._createTransferBatches(
+                transferParams,
+                this._calculateMaxInstructions(!!mintAddress)
+            );
+
+            // 执行批量转账
+            return await this._executeBatches(batches, mintAddress);
+
+        } catch (error) {
+            logger.error('批量转账失败:', {
+                error: error.message,
+                params: { fromType, fromRange, toType, toRange, amount, mintAddress }
+            });
+            throw error;
+        }
+    }
+
+    /**
+     * 准备转账参数
+     */
+    async _prepareTransferParams({
+                                     fromAccounts,
+                                     toAccounts,
+                                     amount,
+                                     mintAddress,
+                                     transferType
+                                 }) {
+        // 获取代币信息（如果是token转账）
+        let tokenInfo = null;
+        if (mintAddress) {
+            const mintPublicKey = new PublicKey(mintAddress);
+            const mintAccount = await getMint(
+                this.connection,
+                mintPublicKey,
+                'confirmed',
+                TOKEN_PROGRAM_ID
+            );
+            tokenInfo = {
+                decimals: mintAccount.decimals,
+                mintAddress: mintAddress
+            };
+        }
+
+        // 构建转账列表
+        const transfers = [];
+        switch (transferType) {
+            case 'oneToMany':
+                const sourceAccount = fromAccounts[0];
+                toAccounts.forEach(targetAccount => {
+                    transfers.push({
+                        from: sourceAccount,
+                        to: targetAccount,
+                        amount
+                    });
+                });
+                break;
+
+            case 'manyToOne':
+                const targetAccount = toAccounts[0];
+                fromAccounts.forEach(sourceAccount => {
+                    transfers.push({
+                        from: sourceAccount,
+                        to: targetAccount,
+                        amount
+                    });
+                });
+                break;
+
+            case 'manyToMany':
+                if (fromAccounts.length !== toAccounts.length) {
+                    throw new Error('多对多转账：源账户和目标账户数量必须相同');
+                }
+                fromAccounts.forEach((sourceAccount, index) => {
+                    transfers.push({
+                        from: sourceAccount,
+                        to: toAccounts[index],
+                        amount
+                    });
+                });
+                break;
+        }
+
+        return {
+            transfers,
+            tokenInfo,
+            transferType
+        };
+    }
+
+    /**
+     * 创建转账批次
+     */
+    _createTransferBatches(transferParams, maxInstructionsPerTx) {
+        const { transfers, tokenInfo } = transferParams;
+        const batches = [];
+
+        // 获取规模配置
+        const scaleConfig = this._getScaleConfig(transfers.length);
+
+        // 分批处理
+        for (let i = 0; i < transfers.length; i += maxInstructionsPerTx) {
+            const batchTransfers = transfers.slice(i, i + maxInstructionsPerTx);
+
+            batches.push({
+                transfers: batchTransfers,
+                tokenInfo,
+                batchIndex: Math.floor(i / maxInstructionsPerTx),
+                config: scaleConfig
+            });
+        }
+
+        return batches;
+    }
+
+    /**
+     * 执行批量转账
+     */
+    async _executeBatches(batches, mintAddress) {
+        const results = {
+            successful: [],
+            failed: [],
+            skipped: []
+        };
+
+        // 获取并发配置
+        const config = this._getScaleConfig(
+            batches.reduce((sum, batch) => sum + batch.transfers.length, 0)
+        );
+
+        // 分组执行批次
+        for (let i = 0; i < batches.length; i += config.maxConcurrent) {
+            const currentBatches = batches.slice(i, i + config.maxConcurrent);
+
+            // 并行执行当前批次
+            const batchResults = await Promise.all(
+                currentBatches.map(batch =>
+                    this._processBatch(batch, mintAddress)
+                )
+            );
+
+            // 合并结果
+            batchResults.forEach(result => {
+                results.successful.push(...result.successful);
+                results.failed.push(...result.failed);
+                results.skipped.push(...result.skipped);
+            });
+
+            // 批次间延迟
+            if (i + config.maxConcurrent < batches.length) {
+                await this._sleep(1000);
+            }
+        }
+
+        return this._formatResults(results, mintAddress);
+    }
+
+    /**
+     * 处理单个批次
+     */
+    async _processBatch(batch, mintAddress) {
+        try {
+            const { transfers, tokenInfo } = batch;
+
+            // 创建交易
+            const transaction = new Transaction();
+
+            // 添加转账指令
+            for (const transfer of transfers) {
+                if (mintAddress) {
+                    await this._addTokenTransferInstruction(
+                        transaction,
+                        transfer,
+                        mintAddress,
+                        tokenInfo.decimals
+                    );
+                } else {
+                    await this._addSolTransferInstruction(
+                        transaction,
+                        transfer
+                    );
+                }
+            }
+
+            // 发送交易
+            const result = await this._sendAndConfirmTransaction(transaction);
+
+            return result;
+
+        } catch (error) {
+            logger.error('处理批次失败:', {
+                error: error.message,
+                batchIndex: batch.batchIndex
+            });
+            throw error;
+        }
+    }
+
+    /**
+     * 添加 SOL 转账指令
+     */
+    async _addSolTransferInstruction(transaction, transfer) {
+        const fromKeypair = await this.walletService.getWalletKeypair(
+            transfer.from.type,
+            transfer.from.accountNumber
+        );
+
+        const toWallet = await this.walletService.getWallet(
+            transfer.to.type,
+            transfer.to.accountNumber
+        );
+
+        transaction.add(
+            SystemProgram.transfer({
+                fromPubkey: fromKeypair.publicKey,
+                toPubkey: new PublicKey(toWallet.publicKey),
+                lamports: Math.floor(transfer.amount * LAMPORTS_PER_SOL)
+            })
+        );
+    }
+
+    /**
+     * 添加 Token 转账指令
+     */
+    async _addTokenTransferInstruction(transaction, transfer, mintAddress, decimals) {
+        const fromKeypair = await this.walletService.getWalletKeypair(
+            transfer.from.type,
+            transfer.from.accountNumber
+        );
+
+        const toWallet = await this.walletService.getWallet(
+            transfer.to.type,
+            transfer.to.accountNumber
+        );
+
+        const mintPublicKey = new PublicKey(mintAddress);
+
+        // 获取源和目标代币账户
+        const fromATA = await getAssociatedTokenAddress(
+            mintPublicKey,
+            fromKeypair.publicKey
+        );
+
+        const toATA = await getAssociatedTokenAddress(
+            mintPublicKey,
+            new PublicKey(toWallet.publicKey)
+        );
+
+        // 检查并创建目标代币账户
+        const toAccountInfo = await this.connection.getAccountInfo(toATA);
+        if (!toAccountInfo) {
+            transaction.add(
+                createAssociatedTokenAccountInstruction(
+                    fromKeypair.publicKey,
+                    toATA,
+                    new PublicKey(toWallet.publicKey),
+                    mintPublicKey
+                )
+            );
+        }
+
+        // 添加转账指令
+        const transferAmount = Math.floor(transfer.amount * Math.pow(10, decimals));
+        transaction.add(
+            createTransferInstruction(
+                fromATA,
+                toATA,
+                fromKeypair.publicKey,
+                transferAmount
+            )
+        );
+    }
+
+    // 辅助方法
+    _parseAccountRange(range) {
+        const [start, end] = range.split('-').map(Number);
+        if (isNaN(start) || isNaN(end) || start > end) {
+            throw new Error('Invalid account range format. Use format like "1-5"');
+        }
+        return Array.from(
+            { length: end - start + 1 },
+            (_, i) => ({
+                accountNumber: start + i,
+                type: 'account'
+            })
+        );
+    }
+
+    async _sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     // 初始化默认组
@@ -2037,128 +2456,250 @@ export class WalletService {
     }
 
     // 批量关闭钱包
-    async batchCloseWallets(fromGroupType, accountRange, recipientGroupType, recipientAccountNumber) {
+    async batchCloseWallets(fromGroupType, accountRange, mainGroupType, mainAccountNumber) {
         try {
-            // 验证参数
-            if (!recipientGroupType || !recipientAccountNumber) {
-                throw new Error('Recipient group type and account number are required');
+            logger.info('开始批量关闭账户:', {
+                fromGroupType,
+                accountRange,
+                mainGroupType,
+                mainAccountNumber
+            });
+
+            // 1. 参数验证
+            if (!mainGroupType || !mainAccountNumber) {
+                throw new Error('Main account information is required');
             }
 
-            // 获取接收者钱包
-            const recipientWallet = await this.getWallet(recipientGroupType, recipientAccountNumber);
-            if (!recipientWallet) {
-                throw new Error('Recipient wallet not found');
+            // 2. 获取主账户
+            const mainWallet = await this.getWallet(mainGroupType, mainAccountNumber);
+            if (!mainWallet) {
+                throw new Error('Main wallet not found');
             }
 
-            // 解析账号范围
+            // 3. 解析账号范围
             const [start, end] = accountRange.split('-').map(Number);
             if (isNaN(start) || isNaN(end) || start > end) {
                 throw new Error('Invalid account range');
             }
 
-            // 获取所有源钱包
-            const fromWallets = await Promise.all(
-                Array.from({ length: end - start + 1 }, (_, i) => 
-                    this.getWallet(fromGroupType, start + i)
-                )
-            );
+            // 4. 获取批处理配置
+            const totalAccounts = end - start + 1;
+            const config = this._getBatchCloseConfig(totalAccounts);
 
-            // 执行关闭操作
-            const results = [];
-            for (const wallet of fromWallets) {
-                try {
-                    if (!wallet) {
-                        results.push({
-                            accountNumber: start + results.length,
-                            status: 'failed',
-                            error: 'Wallet not found'
-                        });
-                        continue;
-                    }
+            // 5. 创建批次
+            const batches = this._createCloseBatches(start, end, config.batchSize);
 
-                    // 检查不能转给自己
-                    if (wallet.publicKey === recipientWallet.publicKey) {
-                        results.push({
-                            accountNumber: wallet.accountNumber,
-                            status: 'failed',
-                            error: 'Cannot close wallet to itself'
-                        });
-                        continue;
-                    }
+            // 6. 处理结果初始化
+            const results = {
+                successful: [],
+                failed: [],
+                skipped: [],
+                summary: {
+                    totalAccounts,
+                    processedAccounts: 0,
+                    solTransferred: 0,
+                    tokensTransferred: [],
+                    closed: 0
+                }
+            };
 
-                    // 关闭账户
-                    const result = await this.solanaService.closeAccount(wallet, recipientWallet.publicKey);
+            // 7. 批量处理
+            for (let i = 0; i < batches.length; i += config.concurrentBatches) {
+                const currentBatches = batches.slice(i, i + config.concurrentBatches);
 
-                    // 更新数据库中的钱包状态
-                    await db.models.Wallet.update(
-                        { 
-                            status: 'closed',
-                            closedAt: new Date(),
-                            closedTo: recipientWallet.publicKey
-                        },
-                        {
-                            where: {
-                                groupType: fromGroupType,
-                                accountNumber: wallet.accountNumber
-                            }
+                // 处理当前批次
+                const batchResults = await Promise.all(
+                    currentBatches.map(batch =>
+                        this._processCloseBatch(batch, fromGroupType, mainWallet, config)
+                    )
+                );
+
+                // 合并结果
+                batchResults.forEach(batchResult => {
+                    results.successful.push(...batchResult.successful);
+                    results.failed.push(...batchResult.failed);
+                    results.skipped.push(...batchResult.skipped);
+                    results.summary.solTransferred += batchResult.solTransferred;
+                    results.summary.closed += batchResult.closed;
+                    // 合并Token转移记录
+                    batchResult.tokensTransferred.forEach(tokenInfo => {
+                        const existingToken = results.summary.tokensTransferred.find(
+                            t => t.mint === tokenInfo.mint
+                        );
+                        if (existingToken) {
+                            existingToken.amount += tokenInfo.amount;
+                        } else {
+                            results.summary.tokensTransferred.push(tokenInfo);
                         }
-                    );
-
-                    // 取消余额订阅
-                    await this.unsubscribeFromBalance(fromGroupType, wallet.accountNumber);
-
-                    // 记录关闭操作
-                    if (db.models.WalletHistory) {
-                        await db.models.WalletHistory.create({
-                            groupType: fromGroupType,
-                            accountNumber: wallet.accountNumber,
-                            publicKey: wallet.publicKey,
-                            action: 'close',
-                            metadata: {
-                                recipientGroupType,
-                                recipientAccountNumber,
-                                recipientPublicKey: recipientWallet.publicKey,
-                                closedBalance: result.closedBalance,
-                                signature: result.signature
-                            }
-                        });
-                    }
-
-                    results.push({
-                        accountNumber: wallet.accountNumber,
-                        status: 'success',
-                        ...result
                     });
-                } catch (error) {
-                    results.push({
-                        accountNumber: wallet.accountNumber,
-                        status: 'failed',
-                        error: error.message
-                    });
+                });
+
+                // 更新进度
+                results.summary.processedAccounts += currentBatches.reduce(
+                    (sum, batch) => sum + batch.length, 0
+                );
+
+                // 批次间延迟
+                if (i + config.concurrentBatches < batches.length) {
+                    await this._sleep(config.delayBetweenBatches);
                 }
             }
 
-            return {
-                fromGroupType,
-                accountRange,
-                recipientGroupType,
-                recipientAccountNumber,
-                recipientPublicKey: recipientWallet.publicKey,
-                totalWallets: end - start + 1,
-                successCount: results.filter(r => r.status === 'success').length,
-                failureCount: results.filter(r => r.status === 'failed').length,
-                results
-            };
+            return results;
+
         } catch (error) {
-            logger.error('批量关闭钱包失败:', {
+            logger.error('批量关闭账户失败:', {
                 error: error.message,
-                fromGroupType,
-                accountRange,
-                recipientGroupType,
-                recipientAccountNumber
+                stack: error.stack,
+                params: {
+                    fromGroupType,
+                    accountRange,
+                    mainGroupType,
+                    mainAccountNumber
+                }
             });
             throw error;
         }
+    }
+
+// 处理单个批次
+    async _processCloseBatch(accountNumbers, fromGroupType, mainWallet, config) {
+        const results = {
+            successful: [],
+            failed: [],
+            skipped: [],
+            solTransferred: 0,
+            tokensTransferred: [],
+            closed: 0
+        };
+
+        for (const accountNumber of accountNumbers) {
+            try {
+                // 1. 获取源钱包
+                const sourceWallet = await this.getWallet(fromGroupType, accountNumber);
+                if (!sourceWallet) {
+                    results.skipped.push({
+                        accountNumber,
+                        reason: 'Wallet not found'
+                    });
+                    continue;
+                }
+
+                // 2. 先检查并转移 Token 余额 (需要 SOL 作为手续费)
+                const tokenTransfers = await this._transferTokenBalances(
+                    sourceWallet,
+                    mainWallet,
+                    config
+                );
+                if (tokenTransfers.length > 0) {
+                    results.tokensTransferred.push(...tokenTransfers);
+                    logger.info('Token 转移完成:', {
+                        fromWallet: sourceWallet.publicKey.toString(),
+                        toWallet: mainWallet.publicKey.toString(),
+                        transfers: tokenTransfers
+                    });
+                }
+
+                // 3. 然后再转移并关闭账户 (一次性转移所有剩余 SOL)
+                const solBalance = await this._transferSolBalance(
+                    sourceWallet,
+                    mainWallet,
+                    config
+                );
+                if (solBalance > 0) {
+                    results.solTransferred += solBalance;
+                    logger.info('SOL 转移完成:', {
+                        fromWallet: sourceWallet.publicKey.toString(),
+                        toWallet: mainWallet.publicKey.toString(),
+                        amount: solBalance
+                    });
+                }
+
+                // 4. 更新数据库状态
+                await this._updateWalletStatus(fromGroupType, accountNumber, mainWallet);
+                results.closed++;
+
+                results.successful.push({
+                    accountNumber,
+                    solTransferred: solBalance,
+                    tokensTransferred: tokenTransfers
+                });
+
+            } catch (error) {
+                logger.error('处理账户关闭失败:', {
+                    error: error.message,
+                    fromGroupType,
+                    accountNumber,
+                    stack: error.stack
+                });
+
+                results.failed.push({
+                    accountNumber,
+                    error: error.message
+                });
+            }
+        }
+
+        return results;
+    }
+
+// 转移SOL余额
+    async _transferSolBalance(sourceWallet, mainWallet, config) {
+        const balance = await this.getBalance(
+            sourceWallet.groupType,
+            sourceWallet.accountNumber
+        );
+
+        if (balance > 0.001) { // 保留0.001 SOL作为关闭账户手续费
+            const transferAmount = balance - 0.001;
+            await this.transfer(
+                sourceWallet.groupType,
+                sourceWallet.accountNumber,
+                mainWallet.groupType,
+                mainWallet.accountNumber,
+                transferAmount
+            );
+            return transferAmount;
+        }
+
+        return 0;
+    }
+
+// 转移Token余额
+    async _transferTokenBalances(sourceWallet, mainWallet, config) {
+        const tokenAccounts = await this.getWalletTokens(
+            sourceWallet.groupType,
+            sourceWallet.accountNumber
+        );
+
+        const transfers = [];
+        for (const token of tokenAccounts.tokens) {
+            if (token.amount > 0) {
+                await this.transferToken(
+                    sourceWallet.groupType,
+                    sourceWallet.accountNumber,
+                    mainWallet.groupType,
+                    mainWallet.accountNumber,
+                    token.address,
+                    token.amount
+                );
+                transfers.push({
+                    mint: token.address,
+                    amount: token.amount
+                });
+            }
+        }
+
+        return transfers;
+    }
+
+    // 获取批处理配置
+    _getBatchCloseConfig(totalAccounts) {
+        if (totalAccounts <= 4) return BATCH_CLOSE_CONFIG.SMALL;
+        if (totalAccounts <= 50) return BATCH_CLOSE_CONFIG.MEDIUM;
+        if (totalAccounts <= 100) return BATCH_CLOSE_CONFIG.LARGE;
+        if (totalAccounts <= 500) return BATCH_CLOSE_CONFIG.XLARGE;
+        return BATCH_CLOSE_CONFIG.XXLARGE;
     }
 
     // 添加新方法用于获取 Keypair

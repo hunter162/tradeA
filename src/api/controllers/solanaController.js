@@ -658,4 +658,182 @@ export class SolanaController {
             });
         }
     }
+    async batchBuyTokens(req, res) {
+        try {
+            const {
+                mainGroup,
+                mainAccountNumber,
+                tradeGroup,
+                makersCount,
+                amountStrategy,
+                amountConfig,
+                jitoTipSol,
+                mintAddress,
+                options = {}
+            } = req.body;
+
+            logger.info('批量买入请求:', {
+                mainGroup,
+                mainAccountNumber,
+                makersCount,
+                amountStrategy
+            });
+
+            const result = await this.solanaService.batchBuyProcess({
+                mainGroup,
+                mainAccountNumber,
+                tradeGroup,
+                makersCount,
+                amountStrategy,
+                amountConfig,
+                jitoTipSol,
+                mintAddress,
+                options
+            });
+
+            res.json({
+                success: true,
+                data: {
+                    ...result,
+                    // 添加UI友好的费用展示
+                    fees: {
+                        createAccountFee: `${result.amounts.fees.createAccountFee} SOL`,
+                        gasFee: `${result.amounts.fees.gasFee} SOL`,
+                        jitoTip: `${result.amounts.fees.jitoTip} SOL`,
+                        priorityFee: `${result.amounts.fees.priorityFee} SOL`,
+                        total: `${result.amounts.fees.total} SOL`
+                    },
+                    totalRequired: `${result.amounts.total} SOL`,
+                    transactions: {
+                        ...result.transactions,
+                        summary: {
+                            total: makersCount * 5, // 5种交易类型
+                            successful: result.transactions.tokenBuy.successful,
+                            failed: result.transactions.tokenBuy.failed
+                        }
+                    }
+                }
+            });
+
+        } catch (error) {
+            logger.error('批量买入处理失败:', {
+                error: error.message,
+                stack: error.stack,
+                params: req.body
+            });
+
+            res.status(400).json({
+                success: false,
+                error: error.message,
+                code: error.code || 'BATCH_BUY_FAILED'
+            });
+        }
+    }
+    // solanaController.js - 添加新方法
+
+    async calculateFees(req, res) {
+        try {
+            const {
+                makersCount,           // makers数量
+                amountStrategy,        // 买入策略
+                amountConfig,         // 买入金额配置
+                jitoTipSol,          // jito小费
+                mainAccountBalance    // 主账户余额(可选,百分比策略需要)
+            } = req.body;
+
+            logger.info('费用计算请求:', {
+                makersCount,
+                amountStrategy,
+                amountConfig
+            });
+
+            // 生成买入金额列表
+            const buyAmounts = await this.solanaService.generateBuyAmounts({
+                strategy: amountStrategy,
+                ...amountConfig,
+                count: makersCount,
+                balance: mainAccountBalance
+            });
+
+            // 计算费用明细
+            const feeBreakdown = await this.solanaService.calculateMainAccountFees({
+                makersCount,
+                amountStrategy,
+                jitoTipSol,
+                amounts: buyAmounts,
+                mainAccountBalance
+            });
+
+            // 格式化响应数据
+            const response = {
+                fees: {
+                    // 创建账户费用
+                    createAccountFee: {
+                        sol: feeBreakdown.breakdown.createAccounts,
+                        description: `创建 ${makersCount} 个账户费用`
+                    },
+                    // 代币账户创建费用
+                    tokenAccountFee: {
+                        sol: feeBreakdown.breakdown.createTokenAccounts,
+                        description: `创建 ${makersCount} 个代币账户费用`
+                    },
+                    // Jito小费
+                    jitoFees: {
+                        sol: feeBreakdown.breakdown.jitoFees,
+                        description: `${makersCount * 5} 笔交易的Jito小费`
+                    },
+                    // 基础交易费用
+                    transactionFees: {
+                        sol: feeBreakdown.breakdown.transactionFees,
+                        description: `${makersCount * 5} 笔交易的基础费用`
+                    },
+                    // 优先费用
+                    priorityFees: {
+                        sol: feeBreakdown.breakdown.priorityFees,
+                        description: `${makersCount * 5} 笔交易的优先费用`
+                    },
+                    // Pump交易费
+                    pumpFees: {
+                        sol: feeBreakdown.breakdown.pumpFee,
+                        description: `Pump交易费(1%)`
+                    }
+                },
+                // 买入金额
+                buyAmount: {
+                    total: feeBreakdown.breakdown.totalBuyAmount,
+                    perAccount: buyAmounts.length > 0 ?
+                        buyAmounts[0] : 0,  // 固定金额时所有账户相同
+                    strategy: amountStrategy,
+                    config: amountConfig
+                },
+                // 总费用汇总
+                summary: {
+                    totalFees: feeBreakdown.breakdown.total,
+                    totalRequired: feeBreakdown.breakdown.total + feeBreakdown.breakdown.totalBuyAmount,
+                    transactionCount: makersCount * 5,
+                    averageCostPerTx: feeBreakdown.breakdown.total / (makersCount * 5)
+                },
+                // lamports单位的费用(链上使用)
+                lamports: feeBreakdown.lamports
+            };
+
+            res.json({
+                success: true,
+                data: response
+            });
+
+        } catch (error) {
+            logger.error('费用计算失败:', {
+                error: error.message,
+                stack: error.stack,
+                params: req.body
+            });
+
+            res.status(400).json({
+                success: false,
+                error: error.message,
+                code: 'FEE_CALCULATION_FAILED'
+            });
+        }
+    }
 } 

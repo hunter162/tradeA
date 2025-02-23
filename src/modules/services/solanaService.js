@@ -3600,4 +3600,779 @@ export class SolanaService {
             throw error;
         }
     }
+    async batchBuyByNumber({
+                               groupType,
+                               accountNumbers, // 4/50/100/500/1000
+                               tokenAddress,
+                               amountSol,
+                               tipAmountSol = 0,
+                               options = {}
+                           }) {
+        try {
+            // 验证账户数量
+            if (![4, 50, 100, 500, 1000].includes(accountNumbers)) {
+                throw new Error('Invalid account numbers. Must be 4, 50, 100, 500, or 1000');
+            }
+
+            logger.info('开始批量买入:', {
+                groupType,
+                accountNumbers,
+                tokenAddress,
+                amountSol,
+                tipAmountSol
+            });
+
+            const operations = [];
+            // 准备操作数组
+            for (let i = 1; i <= accountNumbers; i++) {
+                try {
+                    const wallet = await this.walletService.getWalletKeypair(groupType, i);
+                    if (!wallet) {
+                        throw new Error(`Wallet not found: ${groupType}-${i}`);
+                    }
+
+                    operations.push({
+                        wallet,
+                        mint: new PublicKey(tokenAddress),
+                        amountSol,
+                        tipAmountSol,
+                        options
+                    });
+                } catch (error) {
+                    logger.error(`准备账户 ${i} 失败:`, error);
+                }
+            }
+
+            // 调用 SDK 的批量买入方法
+            const results = await this.sdk.batchBuy(operations);
+
+            // 处理结果
+            const successful = results.filter(r => r.success);
+            const failed = results.filter(r => !r.success);
+
+            // 更新账户余额
+            await Promise.all(
+                successful.map(result =>
+                    this.updateAccountBalances(
+                        { publicKey: new PublicKey(result.wallet) },
+                        new PublicKey(tokenAddress),
+                        result.tokenAmount,
+                        amountSol
+                    )
+                )
+            );
+
+            return {
+                success: true,
+                totalAccounts: accountNumbers,
+                successful: successful.length,
+                failed: failed.length,
+                successfulTransactions: successful,
+                failedTransactions: failed
+            };
+
+        } catch (error) {
+            logger.error('批量买入失败:', {
+                error: error.message,
+                groupType,
+                accountNumbers,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
+
+    async batchSellByNumber({
+                                groupType,
+                                accountNumbers,
+                                tokenAddress,
+                                percentage,
+                                tipAmountSol = 0,
+                                options = {}
+                            }) {
+        try {
+            // 验证账户数量和百分比
+            if (![4, 50, 100, 500, 1000].includes(accountNumbers)) {
+                throw new Error('Invalid account numbers. Must be 4, 50, 100, 500, or 1000');
+            }
+            if (percentage <= 0 || percentage > 100) {
+                throw new Error('Percentage must be between 0 and 100');
+            }
+
+            logger.info('开始批量卖出:', {
+                groupType,
+                accountNumbers,
+                tokenAddress,
+                percentage,
+                tipAmountSol
+            });
+
+            const operations = [];
+            // 准备操作数组
+            for (let i = 1; i <= accountNumbers; i++) {
+                try {
+                    const wallet = await this.walletService.getWalletKeypair(groupType, i);
+                    if (!wallet) {
+                        throw new Error(`Wallet not found: ${groupType}-${i}`);
+                    }
+
+                    // 获取代币余额
+                    const tokenBalance = await this.getTokenBalance(wallet.publicKey, tokenAddress);
+                    if (!tokenBalance || tokenBalance === '0') {
+                        logger.warn(`账户 ${i} 没有代币余额`);
+                        continue;
+                    }
+
+                    // 计算卖出数量
+                    const sellAmount = BigInt(Math.floor(Number(tokenBalance) * (percentage / 100)));
+
+                    operations.push({
+                        wallet,
+                        mint: new PublicKey(tokenAddress),
+                        tokenAmount: sellAmount,
+                        tipAmountSol,
+                        options
+                    });
+                } catch (error) {
+                    logger.error(`准备账户 ${i} 失败:`, error);
+                }
+            }
+
+            // 调用 SDK 的批量卖出方法
+            const results = await this.sdk.batchSell(operations);
+
+            // 处理结果
+            const successful = results.filter(r => r.success);
+            const failed = results.filter(r => !r.success);
+
+            // 更新账户余额
+            await Promise.all(
+                successful.map(result =>
+                    this.updateAccountBalances(
+                        { publicKey: new PublicKey(result.wallet) },
+                        new PublicKey(tokenAddress),
+                        null,  // token 余额会通过 WebSocket 更新
+                        null   // SOL 余额会通过 WebSocket 更新
+                    )
+                )
+            );
+
+            return {
+                success: true,
+                totalAccounts: accountNumbers,
+                successful: successful.length,
+                failed: failed.length,
+                successfulTransactions: successful,
+                failedTransactions: failed
+            };
+
+        } catch (error) {
+            logger.error('批量卖出失败:', {
+                error: error.message,
+                groupType,
+                accountNumbers,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
+
+    async batchBuyAndSellByNumber({
+                                      groupType,
+                                      accountNumbers,
+                                      tokenAddress,
+                                      amountSol,
+                                      tipAmountSol = 0,
+                                      options = {}
+                                  }) {
+        try {
+            // 验证账户数量
+            if (![4, 50, 100, 500, 1000].includes(accountNumbers)) {
+                throw new Error('Invalid account numbers. Must be 4, 50, 100, 500, or 1000');
+            }
+
+            logger.info('开始批量买入并卖出:', {
+                groupType,
+                accountNumbers,
+                tokenAddress,
+                amountSol,
+                tipAmountSol
+            });
+
+            const operations = [];
+            // 准备操作数组
+            for (let i = 1; i <= accountNumbers; i++) {
+                try {
+                    const wallet = await this.walletService.getWalletKeypair(groupType, i);
+                    if (!wallet) {
+                        throw new Error(`Wallet not found: ${groupType}-${i}`);
+                    }
+
+                    operations.push({
+                        wallet,
+                        mint: new PublicKey(tokenAddress),
+                        amountSol,
+                        tipAmountSol,
+                        options
+                    });
+                } catch (error) {
+                    logger.error(`准备账户 ${i} 失败:`, error);
+                }
+            }
+
+            // 调用 SDK 的批量买卖方法
+            const results = await this.sdk.batchBuyAndSell(operations);
+
+            // 处理结果
+            const successful = results.filter(r => r.success);
+            const failed = results.filter(r => !r.success);
+
+            // 更新账户余额
+            await Promise.all(
+                successful.map(result =>
+                    this.updateAccountBalances(
+                        { publicKey: new PublicKey(result.wallet) },
+                        new PublicKey(tokenAddress),
+                        null,  // token 余额会通过 WebSocket 更新
+                        null   // SOL 余额会通过 WebSocket 更新
+                    )
+                )
+            );
+
+            return {
+                success: true,
+                totalAccounts: accountNumbers,
+                successful: successful.length,
+                failed: failed.length,
+                successfulTransactions: successful,
+                failedTransactions: failed
+            };
+
+        } catch (error) {
+            logger.error('批量买入并卖出失败:', {
+                error: error.message,
+                groupType,
+                accountNumbers,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
+    async generateFixedAmount(amount) {
+        try {
+            if (typeof amount !== 'number' || amount <= 0) {
+                throw new Error('Invalid fixed amount');
+            }
+
+            return Array(1).fill(amount);
+        } catch (error) {
+            logger.error('生成固定金额失败:', {
+                error: error.message,
+                amount
+            });
+            throw error;
+        }
+    }
+
+// 生成随机范围金额
+    async generateRandomAmount(min, max, count) {
+        try {
+            if (min >= max || min <= 0) {
+                throw new Error('Invalid range values');
+            }
+
+            const amounts = [];
+            for (let i = 0; i < count; i++) {
+                const random = Math.random() * (max - min) + min;
+                amounts.push(Number(random.toFixed(9))); // SOL 精度为9位
+            }
+
+            logger.info('生成随机金额:', {
+                min,
+                max,
+                count,
+                amounts
+            });
+
+            return amounts;
+        } catch (error) {
+            logger.error('生成随机金额失败:', {
+                error: error.message,
+                min,
+                max,
+                count
+            });
+            throw error;
+        }
+    }
+
+// 生成百分比金额
+    async generatePercentageAmount(balance, percentage, count) {
+        try {
+            if (percentage <= 0 || percentage > 100) {
+                throw new Error('Invalid percentage');
+            }
+
+            const baseAmount = balance * (percentage / 100);
+            const amounts = Array(count).fill(baseAmount);
+
+            logger.info('生成百分比金额:', {
+                balance,
+                percentage,
+                amounts
+            });
+
+            return amounts;
+        } catch (error) {
+            logger.error('生成百分比金额失败:', {
+                error: error.message,
+                balance,
+                percentage
+            });
+            throw error;
+        }
+    }
+
+// 统一的金额生成入口方法
+    async generateBuyAmounts({
+                                 strategy,
+                                 fixedAmount,
+                                 minAmount,
+                                 maxAmount,
+                                 percentage,
+                                 count,
+                                 balance
+                             }) {
+        try {
+            switch (strategy) {
+                case 'fixed':
+                    return await this.generateFixedAmount(fixedAmount);
+
+                case 'random':
+                    return await this.generateRandomAmount(minAmount, maxAmount, count);
+
+                case 'percentage':
+                    return await this.generatePercentageAmount(balance, percentage, count);
+
+                default:
+                    throw new Error(`Unknown amount strategy: ${strategy}`);
+            }
+        } catch (error) {
+            logger.error('生成买入金额失败:', {
+                error: error.message,
+                strategy,
+                params: {
+                    fixedAmount,
+                    minAmount,
+                    maxAmount,
+                    percentage,
+                    count,
+                    balance
+                }
+            });
+            throw error;
+        }
+    }
+    async calculateTotalFees({
+                                 makersCount,
+                                 amountStrategy,
+                                 jitoTipSol,
+                                 amounts
+                             }) {
+        try {
+            // 1. 计算创建账户费用(最少需要0.00203928 SOL包含租金)
+            const CREATE_ACCOUNT_FEE = 0.00203928;
+            const totalCreateAccountFee = CREATE_ACCOUNT_FEE * makersCount;
+
+            // 2. 计算gas基础费用(每笔交易0.000005 SOL)
+            const GAS_BASE = 0.000005;
+            // 需要的交易次数:创建账户 + 转账SOL + 买入token + 转回token + 关闭账户
+            const totalTransactions = makersCount * 5;
+            const totalGasFee = GAS_BASE * totalTransactions;
+
+            // 3. 计算jito小费(每笔交易都需要)
+            const totalJitoTip = jitoTipSol * totalTransactions;
+
+            // 4. 计算优先费用(每笔交易0.000001 SOL)
+            const PRIORITY_FEE = 0.000001;
+            const totalPriorityFee = PRIORITY_FEE * totalTransactions;
+
+            // 5. 计算总买入金额
+            const totalBuyAmount = amounts.reduce((sum, amount) => sum + amount, 0);
+
+            // 6. 计算Pump交易费(1%)
+            const PUMP_FEE_PERCENTAGE = 0.01;
+            const pumpFee = totalBuyAmount * PUMP_FEE_PERCENTAGE;
+
+            // 总费用(SOL)
+            const totalFees = totalCreateAccountFee + totalGasFee + totalJitoTip + totalPriorityFee + pumpFee;
+
+            // 总共需要的金额(SOL)
+            const totalRequired = totalFees + totalBuyAmount;
+
+            // 转换为lamports用于链上操作
+            const feesInLamports = Math.ceil(totalFees * LAMPORTS_PER_SOL);
+            const totalRequiredInLamports = Math.ceil(totalRequired * LAMPORTS_PER_SOL);
+
+            logger.info('费用计算结果:', {
+                makersCount,
+                fees: {
+                    createAccount: totalCreateAccountFee,
+                    gas: totalGasFee,
+                    jitoTip: totalJitoTip,
+                    priority: totalPriorityFee,
+                    pump: pumpFee,
+                    total: totalFees
+                },
+                totalBuyAmount,
+                totalRequired,
+                lamports: {
+                    fees: feesInLamports,
+                    total: totalRequiredInLamports
+                }
+            });
+
+            return {
+                fees: {
+                    createAccountFee: totalCreateAccountFee,
+                    gasFee: totalGasFee,
+                    jitoTip: totalJitoTip,
+                    priorityFee: totalPriorityFee,
+                    pumpFee: pumpFee,
+                    total: totalFees
+                },
+                totalBuyAmount,
+                totalRequired,
+                lamports: {
+                    fees: feesInLamports,
+                    total: totalRequiredInLamports
+                }
+            };
+
+        } catch (error) {
+            logger.error('计算费用失败:', {
+                error: error.message,
+                makersCount,
+                amounts
+            });
+            throw error;
+        }
+    }
+
+// 检查账户余额是否足够
+    async checkSufficientBalance(publicKey, requiredAmount) {
+        try {
+            // requiredAmount 单位是 SOL
+            const requiredLamports = Math.ceil(requiredAmount * LAMPORTS_PER_SOL);
+
+            const balance = await this.connection.getBalance(publicKey);
+            const balanceInSol = balance / LAMPORTS_PER_SOL;
+
+            const isEnough = balance >= requiredLamports;
+            const shortfall = isEnough ? 0 : (requiredLamports - balance) / LAMPORTS_PER_SOL;
+
+            logger.info('余额检查:', {
+                publicKey: publicKey.toString(),
+                required: {
+                    sol: requiredAmount,
+                    lamports: requiredLamports
+                },
+                current: {
+                    sol: balanceInSol,
+                    lamports: balance
+                },
+                isEnough,
+                shortfall
+            });
+
+            return {
+                isEnough,
+                balance: balanceInSol,
+                required: requiredAmount,
+                shortfall,
+                lamports: {
+                    balance,
+                    required: requiredLamports
+                }
+            };
+
+        } catch (error) {
+            logger.error('检查余额失败:', {
+                error: error.message,
+                publicKey: publicKey.toString(),
+                requiredAmount
+            });
+            throw error;
+        }
+    }
+    async batchBuyProcess({
+                              mainGroup = 'main',           // 主账户组
+                              mainAccountNumber,            // 主账户编号
+                              tradeGroup = 'trade',        // 交易组名
+                              makersCount,                 // makers数量(4/50/100/500/1000)
+                              amountStrategy,              // 买入策略 fixed/random/percentage
+                              amountConfig,               // 买入金额配置 {fixedAmount?/minAmount?/maxAmount?/percentage?}
+                              jitoTipSol,                 // jito小费(SOL)
+                              mintAddress,                // 代币地址
+                              options = {
+                                  slippage: 1000          // 默认滑点为10%（以基点为单位，1000 = 10%）
+                              }
+                          }) {
+        try {
+            logger.info('开始批量买入流程:', {
+                mainAccount: `${mainGroup}-${mainAccountNumber}`,
+                makersCount,
+                amountStrategy,
+                jitoTipSol,
+                slippage: `${options.slippage/100}%`
+            });
+
+            // 1. 获取主账户信息并检查
+            const mainWallet = await this.walletService.getWallet(mainGroup, mainAccountNumber);
+            if (!mainWallet) {
+                throw new Error(`Main wallet not found: ${mainGroup}-${mainAccountNumber}`);
+            }
+
+            // 2. 获取主账户余额
+            const mainBalance = await this.getBalance(mainWallet.publicKey);
+
+            // 3. 生成买入金额列表
+            const buyAmounts = await this.generateBuyAmounts({
+                strategy: amountStrategy,
+                ...amountConfig,
+                count: makersCount,
+                balance: mainBalance
+            });
+
+            // 4. 计算总费用 (包含Pump费用和滑点)
+            const feeCalculation = await this.calculateMainAccountFees({
+                makersCount,
+                amountStrategy,
+                jitoTipSol,
+                amounts: buyAmounts,
+                mainAccountBalance: mainBalance,
+                slippage: options.slippage
+            });
+
+            // 5. 检查主账户余额是否足够
+            const balanceCheck = await this.checkSufficientBalance(
+                mainWallet.publicKey,
+                feeCalculation.totalRequired
+            );
+
+            if (!balanceCheck.isEnough) {
+                throw new Error(`Insufficient balance: Required ${feeCalculation.totalRequired} SOL, ` +
+                    `have ${balanceCheck.balance} SOL, shortfall ${balanceCheck.shortfall} SOL`);
+            }
+
+            // 6. 创建交易组的makers账户
+            const createResult = await this.walletService.batchCreateWallets(
+                tradeGroup,
+                makersCount
+            );
+
+            if (createResult.failed > 0) {
+                throw new Error(`Failed to create ${createResult.failed} maker accounts`);
+            }
+
+            // 7. 主账户向makers账户转账SOL
+            const solTransferResult = await this.walletService.oneToMany(
+                mainGroup,
+                mainAccountNumber,
+                tradeGroup,
+                `1-${makersCount}`,
+                buyAmounts
+            );
+
+            // 8. makers账户批量买入token，加入滑点配置
+            const operations = buyAmounts.map((amount, index) => ({
+                groupType: tradeGroup,
+                accountNumber: index + 1,
+                solAmount: amount,
+                tipAmountSol: jitoTipSol,
+                options: {
+                    slippageBasisPoints: options.slippage || 1000, // 使用传入的滑点或默认10%
+                    priorityFee: true
+                }
+            }));
+
+            const buyResults = await this.sdk.batchBuy(operations);
+
+            // 9. makers账户将token转回主账户
+            const tokenTransferResult = await this.walletService.manyToOne(
+                tradeGroup,
+                `1-${makersCount}`,
+                mainGroup,
+                mainAccountNumber
+            );
+
+            // 10. 关闭makers账户
+            const closeResult = await this.walletService.batchCloseWallets(
+                tradeGroup,
+                `1-${makersCount}`,
+                mainGroup,
+                mainAccountNumber
+            );
+
+            // 整理执行结果
+            const result = {
+                mainAccount: {
+                    group: mainGroup,
+                    accountNumber: mainAccountNumber,
+                    publicKey: mainWallet.publicKey.toString()
+                },
+                makers: {
+                    group: tradeGroup,
+                    count: makersCount,
+                    created: createResult.created,
+                    closed: closeResult.summary.closed
+                },
+                amounts: {
+                    buyAmounts,
+                    fees: {
+                        ...feeCalculation.fees,
+                        pumpFeePercentage: '1%',
+                        slippagePercentage: `${options.slippage/100}%`
+                    },
+                    total: feeCalculation.totalRequired
+                },
+                transactions: {
+                    solTransfer: {
+                        successful: solTransferResult.successful.length,
+                        failed: solTransferResult.failed.length
+                    },
+                    tokenBuy: {
+                        successful: buyResults.filter(r => r.success).length,
+                        failed: buyResults.filter(r => !r.success).length
+                    },
+                    tokenTransfer: {
+                        successful: tokenTransferResult.successful.length,
+                        failed: tokenTransferResult.failed.length
+                    }
+                },
+                timestamp: new Date().toISOString()
+            };
+
+            logger.info('批量买入流程完成:', {
+                mainAccount: `${mainGroup}-${mainAccountNumber}`,
+                makersCount,
+                successful: result.transactions.tokenBuy.successful,
+                failed: result.transactions.tokenBuy.failed,
+                slippage: `${options.slippage/100}%`
+            });
+
+            return result;
+
+        } catch (error) {
+            logger.error('批量买入流程失败:', {
+                error: error.message,
+                stack: error.stack,
+                mainAccount: `${mainGroup}-${mainAccountNumber}`,
+                makersCount,
+                slippage: options.slippage
+            });
+            throw error;
+        }
+    }
+    // solanaService.js 修改 calculateMainAccountFees 方法
+    async calculateMainAccountFees({
+                                       makersCount,
+                                       amountStrategy,
+                                       jitoTipSol,
+                                       amounts,
+                                       mainAccountBalance,
+                                       slippage = 1000 // 默认滑点为10%（以基点为单位，1000 = 10%）
+                                   }) {
+        try {
+            // 1. 计算创建账户费用(最少需要0.00203928 SOL包含租金)
+            const CREATE_ACCOUNT_FEE = 0.00203928;
+            const totalCreateAccountFee = CREATE_ACCOUNT_FEE * makersCount;
+
+            // 2. 计算gas基础费用(每笔交易0.000005 SOL)
+            const GAS_BASE = 0.000005;
+            // 需要的交易次数:创建账户 + 转账SOL + 买入token + 转回token + 关闭账户
+            const totalTransactions = makersCount * 5;
+            const totalGasFee = GAS_BASE * totalTransactions;
+
+            // 3. 计算jito小费(每笔交易都需要)
+            const totalJitoTip = jitoTipSol * totalTransactions;
+
+            // 4. 计算优先费用(每笔交易0.000001 SOL)
+            const PRIORITY_FEE = 0.000001;
+            const totalPriorityFee = PRIORITY_FEE * totalTransactions;
+
+            // 5. 计算总买入金额
+            const totalBuyAmount = amounts.reduce((sum, amount) => sum + amount, 0);
+
+            // 6. 计算滑点费用 (新增)
+            const slippagePercentage = slippage / 10000; // 转换基点为百分比
+            const slippageCost = totalBuyAmount * slippagePercentage;
+
+            // 7. 计算Pump交易费(1%)
+            const PUMP_FEE_PERCENTAGE = 0.01;
+            const pumpFee = totalBuyAmount * PUMP_FEE_PERCENTAGE;
+
+            // 总费用(SOL)，加入滑点成本
+            const totalFees = totalCreateAccountFee +
+                totalGasFee +
+                totalJitoTip +
+                totalPriorityFee +
+                pumpFee +
+                slippageCost;
+
+            // 总共需要的金额(SOL)
+            const totalRequired = totalFees + totalBuyAmount;
+
+            // 转换为lamports用于链上操作
+            const feesInLamports = Math.ceil(totalFees * LAMPORTS_PER_SOL);
+            const totalRequiredInLamports = Math.ceil(totalRequired * LAMPORTS_PER_SOL);
+
+            logger.info('费用计算结果:', {
+                makersCount,
+                slippage: `${slippage/100}%`,
+                fees: {
+                    createAccount: totalCreateAccountFee,
+                    gas: totalGasFee,
+                    jitoTip: totalJitoTip,
+                    priority: totalPriorityFee,
+                    pump: pumpFee,
+                    slippage: slippageCost,
+                    total: totalFees
+                },
+                totalBuyAmount,
+                totalRequired,
+                lamports: {
+                    fees: feesInLamports,
+                    total: totalRequiredInLamports
+                }
+            });
+
+            return {
+                fees: {
+                    createAccountFee: totalCreateAccountFee,
+                    gasFee: totalGasFee,
+                    jitoTip: totalJitoTip,
+                    priorityFee: totalPriorityFee,
+                    pumpFee: pumpFee,
+                    slippageFee: slippageCost,
+                    total: totalFees
+                },
+                totalBuyAmount,
+                totalRequired,
+                lamports: {
+                    fees: feesInLamports,
+                    total: totalRequiredInLamports
+                }
+            };
+
+        } catch (error) {
+            logger.error('计算费用失败:', {
+                error: error.message,
+                makersCount,
+                amounts,
+                slippage
+            });
+            throw error;
+        }
+    }
 }
