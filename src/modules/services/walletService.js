@@ -1347,12 +1347,12 @@ export class WalletService {
                 balanceInSOL: balance / LAMPORTS_PER_SOL
             });
 
-            if (balance > 0) {
-                throw new CustomError(
-                    ErrorCodes.WALLET.BALANCE_EXISTS,
-                    `钱包已有余额，无法导入: ${groupType}-${accountNumber} (${balance / LAMPORTS_PER_SOL} SOL)`
-                );
-            }
+            // if (balance > 0) {
+            //     throw new CustomError(
+            //         ErrorCodes.WALLET.BALANCE_EXISTS,
+            //         `钱包已有余额，无法导入: ${groupType}-${accountNumber} (${balance / LAMPORTS_PER_SOL} SOL)`
+            //     );
+            // }
 
             // 加密私钥
             const privateKeyBase64 = Buffer.from(keypair.secretKey).toString('base64');
