@@ -385,7 +385,7 @@ export function createSolanaRoutes(solanaController) {
         solanaValidators.batchBuy,
         validateRequest,
         async (req, res) => {
-            await req.solanaController.batchBuyTokens(req, res);
+            await solanaController.batchBuyTokens(req, res);
         }
     );
 
@@ -393,7 +393,7 @@ export function createSolanaRoutes(solanaController) {
         solanaValidators.calculateFees,
         validateRequest,
         async (req, res) => {
-            await req.solanaController.calculateFees(req, res);
+            await solanaController.calculateFees(req, res);
         }
     );
     return router;
