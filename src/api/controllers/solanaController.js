@@ -734,11 +734,12 @@ export class SolanaController {
     async calculateFees(req, res) {
         try {
             const {
+                mainGroup = 'main',
+                mainAccountNumber,
                 makersCount,           // makers数量
                 amountStrategy,        // 买入策略
                 amountConfig,         // 买入金额配置
-                jitoTipSol,          // jito小费
-                mainAccountBalance    // 主账户余额(可选,百分比策略需要)
+                jitoTipSol
             } = req.body;
 
             logger.info('费用计算请求:', {
@@ -746,14 +747,35 @@ export class SolanaController {
                 amountStrategy,
                 amountConfig
             });
+            const mainAccountWallet = await this.solanaService.walletService.getWallet(
+                mainGroup,
+                mainAccountNumber
+            );
 
-            // 生成买入金额列表
-            const buyAmounts = await this.solanaService.generateBuyAmounts({
-                strategy: amountStrategy,
-                ...amountConfig,
-                count: makersCount,
-                balance: mainAccountBalance
-            });
+            if (!mainAccountWallet) {
+                throw new Error(`Main wallet not found: ${mainGroup}-${mainAccountNumber}`);
+            }
+
+            const mainAccountBalance = await this.solanaService.getBalance(
+                mainAccountWallet.publicKey
+            );
+
+            let buyAmounts;
+            if (amountStrategy === 'random') {
+                // 随机策略使用最大值
+                const maxAmount = amountConfig.maxAmount;
+                if (!maxAmount || maxAmount <= 0) {
+                    throw new Error('Invalid maxAmount for random strategy');
+                }
+                buyAmounts = Array(makersCount).fill(maxAmount);
+            } else {
+                // 其他策略使用正常的金额生成逻辑
+                buyAmounts = await this.solanaService.generateBuyAmounts({
+                    strategy: amountStrategy,
+                    ...amountConfig,
+                    count: makersCount
+                });
+            }
 
             // 计算费用明细
             const feeBreakdown = await this.solanaService.calculateMainAccountFees({
@@ -769,51 +791,50 @@ export class SolanaController {
                 fees: {
                     // 创建账户费用
                     createAccountFee: {
-                        sol: feeBreakdown.breakdown.createAccounts,
+                        sol: feeBreakdown.fees.createAccount,
                         description: `创建 ${makersCount} 个账户费用`
                     },
-                    // 代币账户创建费用
+                    // 代币账户创建费用（在真实数据中可能需要另外计算）
                     tokenAccountFee: {
-                        sol: feeBreakdown.breakdown.createTokenAccounts,
+                        sol: feeBreakdown.fees.gas,  // 或其他适当的值
                         description: `创建 ${makersCount} 个代币账户费用`
                     },
                     // Jito小费
                     jitoFees: {
-                        sol: feeBreakdown.breakdown.jitoFees,
+                        sol: feeBreakdown.fees.jitoTip,
                         description: `${makersCount * 5} 笔交易的Jito小费`
                     },
                     // 基础交易费用
                     transactionFees: {
-                        sol: feeBreakdown.breakdown.transactionFees,
+                        sol: feeBreakdown.fees.gas,
                         description: `${makersCount * 5} 笔交易的基础费用`
                     },
                     // 优先费用
                     priorityFees: {
-                        sol: feeBreakdown.breakdown.priorityFees,
+                        sol: feeBreakdown.fees.priority,
                         description: `${makersCount * 5} 笔交易的优先费用`
                     },
                     // Pump交易费
                     pumpFees: {
-                        sol: feeBreakdown.breakdown.pumpFee,
+                        sol: feeBreakdown.fees.pump,
                         description: `Pump交易费(1%)`
                     }
                 },
                 // 买入金额
                 buyAmount: {
-                    total: feeBreakdown.breakdown.totalBuyAmount,
-                    perAccount: buyAmounts.length > 0 ?
-                        buyAmounts[0] : 0,  // 固定金额时所有账户相同
+                    total: feeBreakdown.totalBuyAmount,
+                    perAccount: buyAmounts.length > 0 ? buyAmounts[0] : 0,
                     strategy: amountStrategy,
                     config: amountConfig
                 },
                 // 总费用汇总
                 summary: {
-                    totalFees: feeBreakdown.breakdown.total,
-                    totalRequired: feeBreakdown.breakdown.total + feeBreakdown.breakdown.totalBuyAmount,
+                    totalFees: feeBreakdown.fees.total,
+                    totalRequired: feeBreakdown.totalRequired,
                     transactionCount: makersCount * 5,
-                    averageCostPerTx: feeBreakdown.breakdown.total / (makersCount * 5)
+                    averageCostPerTx: feeBreakdown.fees.total / (makersCount * 5)
                 },
-                // lamports单位的费用(链上使用)
+                // lamports单位的费用
                 lamports: feeBreakdown.lamports
             };
 
