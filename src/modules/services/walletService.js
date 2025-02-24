@@ -1326,146 +1326,150 @@ export class WalletService {
 
     // 导入钱包
     async importWallet(groupType, accountNumber, privateKey) {
+        // 开启数据库事务
+        let transaction = null;
+        let wallet = null;
+        let subscriptionId = null;
+
         try {
+            transaction = await db.sequelize.transaction();
             logger.info('开始导入钱包:', {
                 groupType,
                 accountNumber
             });
 
+            // 第一阶段: 关键操作 - 钱包导入和数据库操作
             // 解码私钥
             const decodedPrivateKey = bs58.decode(privateKey);
             const keypair = Keypair.fromSecretKey(decodedPrivateKey);
 
             // 检查钱包余额
             const balance = await this.solanaService.getBalance(keypair.publicKey.toString());
-            
-            logger.info('检查钱包余额:', {
-                groupType,
-                accountNumber,
-                publicKey: keypair.publicKey.toString(),
-                balance,
-                balanceInSOL: balance / LAMPORTS_PER_SOL
-            });
-
-            // if (balance > 0) {
-            //     throw new CustomError(
-            //         ErrorCodes.WALLET.BALANCE_EXISTS,
-            //         `钱包已有余额，无法导入: ${groupType}-${accountNumber} (${balance / LAMPORTS_PER_SOL} SOL)`
-            //     );
-            // }
 
             // 加密私钥
             const privateKeyBase64 = Buffer.from(keypair.secretKey).toString('base64');
             const encryptedData = await this.encryptionManager.encrypt(privateKeyBase64);
 
-            // 保存或更新到数据库
-            const [wallet, created] = await db.models.Wallet.upsert({
-                groupType,
-                accountNumber,
-                publicKey: keypair.publicKey.toString(),
-                encryptedPrivateKey: encryptedData.encryptedData,
-                iv: encryptedData.iv,
-                salt: encryptedData.salt,
-                authTag: encryptedData.authTag,
-                status: 'active',
-                metadata: {
-                    imported: true,
-                    importedAt: new Date().toISOString()
+            // 查找现有钱包
+            const existingWallet = await db.models.Wallet.findOne({
+                where: {
+                    groupType,
+                    accountNumber
+                },
+                transaction
+            });
+
+            if (existingWallet) {
+                // 更新现有钱包
+                await existingWallet.update({
+                    publicKey: keypair.publicKey.toString(),
+                    encryptedPrivateKey: encryptedData.encryptedData,
+                    iv: encryptedData.iv,
+                    salt: encryptedData.salt,
+                    authTag: encryptedData.authTag,
+                    status: 'active',
+                    metadata: {
+                        imported: true,
+                        importedAt: new Date().toISOString(),
+                        previousPublicKey: existingWallet.publicKey
+                    }
+                }, { transaction });
+
+                wallet = existingWallet;
+            } else {
+                // 创建新钱包
+                wallet = await db.models.Wallet.create({
+                    groupType,
+                    accountNumber,
+                    publicKey: keypair.publicKey.toString(),
+                    encryptedPrivateKey: encryptedData.encryptedData,
+                    iv: encryptedData.iv,
+                    salt: encryptedData.salt,
+                    authTag: encryptedData.authTag,
+                    status: 'active',
+                    metadata: {
+                        imported: true,
+                        importedAt: new Date().toISOString()
+                    }
+                }, { transaction });
+            }
+
+            // 提交事务
+            await transaction.commit();
+            transaction = null;
+            // 第二阶段: 非关键操作 - WebSocket 订阅和缓存更新
+            try {
+                // 更新 Redis 缓存
+                if (this.redis) {
+                    const cacheKey = `wallet:${groupType}:${accountNumber}`;
+                    const cacheData = JSON.stringify({
+                        publicKey: keypair.publicKey.toString(),
+                        balance: balance / LAMPORTS_PER_SOL,
+                        lastUpdated: new Date().toISOString()
+                    });
+
+                    await this.redis.set(cacheKey, cacheData, { EX: 3600 });
                 }
-            });
 
-            // 订阅余额变动
-            await this.subscribeToBalance(groupType, accountNumber);
+                // 尝试设置余额订阅
+                try {
+                    subscriptionId = await this.solanaService.subscribeToBalance({
+                        publicKey: keypair.publicKey.toString(),
+                        groupType,
+                        accountNumber,
+                        lastKnownBalance: balance / LAMPORTS_PER_SOL
+                    });
 
-            logger.info('钱包导入成功:', {
-                groupType,
-                accountNumber,
-                publicKey: keypair.publicKey.toString(),
-                created: created ? '新建' : '更新'
-            });
+                    logger.info('余额订阅设置成功:', {
+                        groupType,
+                        accountNumber,
+                        publicKey: keypair.publicKey.toString(),
+                        subscriptionId
+                    });
+                } catch (subscriptionError) {
+                    // 订阅失败不影响导入结果
+                    logger.warn('余额订阅设置失败 (非致命错误):', {
+                        error: subscriptionError.message,
+                        groupType,
+                        accountNumber,
+                        publicKey: keypair.publicKey.toString()
+                    });
+                }
+            } catch (nonCriticalError) {
+                // 非关键操作失败不影响导入结果
+                logger.warn('非关键操作失败 (缓存/订阅):', {
+                    error: nonCriticalError.message,
+                    groupType,
+                    accountNumber
+                });
+            }
 
-            return wallet;
+            // 返回导入结果
+            return {
+                ...wallet.toJSON(),
+                balance: balance / LAMPORTS_PER_SOL,
+                subscriptionId  // 可能为 null,如果订阅失败
+            };
+
         } catch (error) {
-            logger.error('导入钱包失败:', {
+            if (transaction) {
+                try {
+                    await transaction.rollback();
+                } catch (rollbackError) {
+                    logger.error('事务回滚失败:', {
+                        error: rollbackError.message,
+                        originalError: error.message
+                    });
+                }
+            }
+
+            logger.error('钱包导入失败:', {
                 error: error.message,
                 stack: error.stack,
                 groupType,
                 accountNumber
             });
-            throw error;
-        }
-    }
 
-    // 订阅钱包余额变动
-    async subscribeToBalance(groupType, accountNumber) {
-        try {
-            const wallet = await this.getWallet(groupType, accountNumber);
-            if (!wallet) {
-                throw new CustomError(
-                    ErrorCodes.WALLET.NOT_FOUND,
-                    `钱包不存在: ${groupType}-${accountNumber}`
-                );
-            }
-
-            const publicKey = wallet.publicKey;
-            const subscriptionKey = `${groupType}:${accountNumber}`;
-
-            // 如果已经订阅，先取消旧的订阅
-            if (this.balanceSubscriptions.has(subscriptionKey)) {
-                await this.unsubscribeFromBalance(groupType, accountNumber);
-            }
-
-            // 订阅账户变动
-            const subscriptionId = await this.solanaService.subscribeToAccountChanges(
-                publicKey,
-                async (balance) => {
-                    try {
-                        // 更新 Redis 缓存
-                        if (this.redis) {
-                            const cacheKey = `wallet:balance:${subscriptionKey}`;
-                            const balanceInSOL = balance / LAMPORTS_PER_SOL;
-                            await this.redis.set(cacheKey, balanceInSOL.toString());
-                        }
-
-                        // 记录余额变动
-                        logger.info('钱包余额变动:', {
-                            groupType,
-                            accountNumber,
-                            publicKey,
-                            newBalance: balance / LAMPORTS_PER_SOL,
-                            lamports: balance
-                        });
-                    } catch (error) {
-                        logger.error('处理余额变动失败:', {
-                            error: error.message,
-                            groupType,
-                            accountNumber,
-                            publicKey
-                        });
-                    }
-                }
-            );
-
-            // 保存订阅信息
-            this.balanceSubscriptions.set(subscriptionKey, {
-                subscriptionId,
-                publicKey
-            });
-
-            logger.info('余额订阅成功:', {
-                groupType,
-                accountNumber,
-                publicKey,
-                subscriptionId
-            });
-
-            return subscriptionId;
-        } catch (error) {
-            logger.error('订阅余额失败:', {
-                error: error.message,
-                groupType,
-                accountNumber
-            });
             throw error;
         }
     }
@@ -1501,6 +1505,8 @@ export class WalletService {
     // 1对多转账
     async oneToMany(fromGroupType, fromAccountNumber, toGroupType, toAccountRange, amount = null) {
         try {
+            logger.info("fromGroupType, fromAccountNumber, toGroupType, toAccountRange, amount",
+                {fromGroupType, fromAccountNumber, toGroupType, toAccountRange, amount})
             // 获取源钱包
             const fromWallet = await this.getWalletKeypair(fromGroupType, fromAccountNumber);
             if (!fromWallet) {
@@ -2561,7 +2567,71 @@ export class WalletService {
             throw error;
         }
     }
+    /**
+     * 创建账户关闭的批次数组
+     * @param {number} start - 起始账号
+     * @param {number} end - 结束账号
+     * @param {number} batchSize - 每个批次的大小
+     * @returns {Array<Array<number>>} 批次数组
+     * @throws {Error} 参数验证失败时抛出错误
+     */
+    _createCloseBatches(start, end, batchSize) {
+        try {
+            // 参数验证
+            if (!Number.isInteger(start) || !Number.isInteger(end) || !Number.isInteger(batchSize)) {
+                throw new Error('所有参数必须为整数');
+            }
 
+            if (start > end) {
+                throw new Error('起始账号不能大于结束账号');
+            }
+
+            if (batchSize <= 0) {
+                throw new Error('批次大小必须大于0');
+            }
+
+            const batches = [];
+            let currentBatch = [];
+            const totalAccounts = end - start + 1;
+
+            logger.info('开始创建关闭批次', {
+                start,
+                end,
+                batchSize,
+                totalAccounts
+            });
+
+            for (let accountNumber = start; accountNumber <= end; accountNumber++) {
+                currentBatch.push(accountNumber);
+
+                if (currentBatch.length === batchSize || accountNumber === end) {
+                    batches.push([...currentBatch]);
+
+                    logger.debug('创建新批次', {
+                        batchNumber: batches.length,
+                        batchSize: currentBatch.length,
+                        accounts: currentBatch
+                    });
+
+                    currentBatch = [];
+                }
+            }
+
+            logger.info('批次创建完成', {
+                totalBatches: batches.length,
+                totalAccounts: totalAccounts
+            });
+
+            return batches;
+
+        } catch (error) {
+            logger.error('创建关闭批次失败', {
+                error: error.message,
+                params: { start, end, batchSize }
+            });
+            throw error;
+        }
+    }
 // 处理单个批次
     async _processCloseBatch(accountNumbers, fromGroupType, mainWallet, config) {
         const results = {
@@ -2616,7 +2686,21 @@ export class WalletService {
                 }
 
                 // 4. 更新数据库状态
-                await this._updateWalletStatus(fromGroupType, accountNumber, mainWallet);
+                await db.models.Wallet.update(
+                    {
+                        status: 'closed',
+                        metadata: {
+                            closedAt: new Date().toISOString(),
+                            closedBy: mainWallet.publicKey.toString()
+                        }
+                    },
+                    {
+                        where: {
+                            groupType:fromGroupType,
+                            accountNumber
+                        }
+                    }
+                );
                 results.closed++;
 
                 results.successful.push({
@@ -2642,6 +2726,9 @@ export class WalletService {
 
         return results;
     }
+
+
+
 
 // 转移SOL余额
     async _transferSolBalance(sourceWallet, mainWallet, config) {
@@ -2911,8 +2998,14 @@ export class WalletService {
                 await this.redis.set(cacheKey, balanceInSOL.toString());
             }
 
-            // 确保有余额订阅
-            await this.subscribeToBalance(groupType, accountNumber);
+            if (this.solanaService && typeof this.solanaService.subscribeToBalance === 'function') {
+                await this.solanaService.subscribeToBalance({
+                    publicKey,
+                    groupType,
+                    accountNumber,
+                    lastKnownBalance: balanceInSOL
+                });
+            }
 
             return balanceInSOL;
         } catch (error) {

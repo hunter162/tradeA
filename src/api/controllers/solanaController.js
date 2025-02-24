@@ -742,42 +742,80 @@ export class SolanaController {
                 jitoTipSol
             } = req.body;
 
+            // 1. 验证基本参数
+            if (!mainAccountNumber) {
+                throw new Error('主账户编号是必需的');
+            }
+
+            if (!makersCount || ![4, 50, 100, 500, 1000].includes(makersCount)) {
+                throw new Error('makers数量必须是4/50/100/500/1000之一');
+            }
+
+            if (!amountStrategy || !['fixed', 'random', 'percentage'].includes(amountStrategy)) {
+                throw new Error('无效的买入策略');
+            }
+
+            // 2. 验证金额配置
+            if (!amountConfig) {
+                throw new Error('缺少金额配置');
+            }
+
+            switch (amountStrategy) {
+                case 'fixed':
+                    if (typeof amountConfig.fixedAmount !== 'number' || amountConfig.fixedAmount <= 0) {
+                        throw new Error('固定金额必须大于0');
+                    }
+                    break;
+                case 'random':
+                    if (!amountConfig.maxAmount || !amountConfig.minAmount ||
+                        amountConfig.maxAmount <= amountConfig.minAmount) {
+                        throw new Error('随机金额范围无效');
+                    }
+                    break;
+                case 'percentage':
+                    if (typeof amountConfig.percentage !== 'number' ||
+                        amountConfig.percentage <= 0 ||
+                        amountConfig.percentage > 100) {
+                        throw new Error('百分比必须在0-100之间');
+                    }
+                    break;
+            }
+
             logger.info('费用计算请求:', {
                 makersCount,
                 amountStrategy,
                 amountConfig
             });
+
+            // 3. 获取主账户
             const mainAccountWallet = await this.solanaService.walletService.getWallet(
                 mainGroup,
                 mainAccountNumber
             );
 
             if (!mainAccountWallet) {
-                throw new Error(`Main wallet not found: ${mainGroup}-${mainAccountNumber}`);
+                throw new Error(`未找到主账户: ${mainGroup}-${mainAccountNumber}`);
             }
 
+            // 4. 获取主账户余额
             const mainAccountBalance = await this.solanaService.getBalance(
                 mainAccountWallet.publicKey
             );
 
+            // 5. 生成买入金额列表
             let buyAmounts;
-            if (amountStrategy === 'random') {
-                // 随机策略使用最大值
-                const maxAmount = amountConfig.maxAmount;
-                if (!maxAmount || maxAmount <= 0) {
-                    throw new Error('Invalid maxAmount for random strategy');
-                }
-                buyAmounts = Array(makersCount).fill(maxAmount);
-            } else {
-                // 其他策略使用正常的金额生成逻辑
-                buyAmounts = await this.solanaService.generateBuyAmounts({
-                    strategy: amountStrategy,
-                    ...amountConfig,
-                    count: makersCount
-                });
+            if (amountStrategy === 'percentage' && mainAccountBalance === 0) {
+                throw new Error('账户余额为0，无法使用百分比策略');
             }
 
-            // 计算费用明细
+            buyAmounts = await this.solanaService.generateBuyAmounts({
+                strategy: amountStrategy,
+                ...amountConfig,
+                count: makersCount,
+                balance: mainAccountBalance
+            });
+
+            // 6. 计算费用明细
             const feeBreakdown = await this.solanaService.calculateMainAccountFees({
                 makersCount,
                 amountStrategy,
@@ -786,17 +824,17 @@ export class SolanaController {
                 mainAccountBalance
             });
 
-            // 格式化响应数据
+            // 7. 格式化响应数据
             const response = {
                 fees: {
                     // 创建账户费用
                     createAccountFee: {
-                        sol: feeBreakdown.fees.createAccount,
+                        sol: feeBreakdown.fees.createAccountFee,
                         description: `创建 ${makersCount} 个账户费用`
                     },
-                    // 代币账户创建费用（在真实数据中可能需要另外计算）
+                    // 代币账户创建费用
                     tokenAccountFee: {
-                        sol: feeBreakdown.fees.gas,  // 或其他适当的值
+                        sol: feeBreakdown.fees.gasFee,
                         description: `创建 ${makersCount} 个代币账户费用`
                     },
                     // Jito小费
@@ -806,17 +844,17 @@ export class SolanaController {
                     },
                     // 基础交易费用
                     transactionFees: {
-                        sol: feeBreakdown.fees.gas,
+                        sol: feeBreakdown.fees.gasFee,
                         description: `${makersCount * 5} 笔交易的基础费用`
                     },
                     // 优先费用
                     priorityFees: {
-                        sol: feeBreakdown.fees.priority,
+                        sol: feeBreakdown.fees.priorityFee,
                         description: `${makersCount * 5} 笔交易的优先费用`
                     },
                     // Pump交易费
                     pumpFees: {
-                        sol: feeBreakdown.fees.pump,
+                        sol: feeBreakdown.fees.pumpFee,
                         description: `Pump交易费(1%)`
                     }
                 },
@@ -829,10 +867,13 @@ export class SolanaController {
                 },
                 // 总费用汇总
                 summary: {
+                    currentBalance: mainAccountBalance,
                     totalFees: feeBreakdown.fees.total,
                     totalRequired: feeBreakdown.totalRequired,
                     transactionCount: makersCount * 5,
-                    averageCostPerTx: feeBreakdown.fees.total / (makersCount * 5)
+                    averageCostPerTx: feeBreakdown.fees.total / (makersCount * 5),
+                    insufficientAmount: mainAccountBalance < feeBreakdown.totalRequired ?
+                        feeBreakdown.totalRequired - mainAccountBalance : 0
                 },
                 // lamports单位的费用
                 lamports: feeBreakdown.lamports

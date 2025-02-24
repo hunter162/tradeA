@@ -1416,13 +1416,15 @@ export class SolanaService {
     // 转账方法
     async transfer(fromWallet, toAddress, amountSol, options = {}) {
         try {
-            // 将 SOL 转换为 lamports
-            const amountInLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+            const amount = Array.isArray(amountSol) ? amountSol[0] : amountSol;
+
+            const amountInLamports = Math.floor(amount * LAMPORTS_PER_SOL);
             const estimatedFee = 5000; // 预估交易费用 (lamports)
             const totalRequired = amountInLamports + estimatedFee;
 
             // 检查余额
-            const balanceCheck = await this.checkBalance(fromWallet.publicKey, amountSol + (estimatedFee / LAMPORTS_PER_SOL));
+            const balanceCheck = await this.checkBalance(fromWallet.publicKey,
+                amount  + (estimatedFee / LAMPORTS_PER_SOL));
 
             if (!balanceCheck.hasEnoughBalance) {
                 throw new Error(`Insufficient balance. Need ${(Math.abs(balanceCheck.difference) / LAMPORTS_PER_SOL).toFixed(9)} more SOL`);
@@ -3909,17 +3911,32 @@ export class SolanaService {
 // 生成百分比金额
     async generatePercentageAmount(balance, percentage, count) {
         try {
-            if (percentage <= 0 || percentage > 100) {
-                throw new Error('Invalid percentage');
+            // 输入参数验证
+            if (typeof balance !== 'number' || balance < 0) {
+                throw new Error('余额必须是非负数');
             }
 
-            const baseAmount = balance * (percentage / 100);
+            if (typeof percentage !== 'number' || percentage <= 0 || percentage > 100) {
+                throw new Error('百分比必须在0到100之间');
+            }
+
+            if (typeof count !== 'number' || count <= 0) {
+                throw new Error('数量必须是正数');
+            }
+
+            // 根据百分比计算金额
+            const baseAmount = (balance * percentage) / 100;
+
+            // 创建包含计算金额的数组
             const amounts = Array(count).fill(baseAmount);
 
-            logger.info('生成百分比金额:', {
-                balance,
-                percentage,
-                amounts
+            // 记录生成的金额信息
+            logger.info('生成基于百分比的金额:', {
+                balance,           // 原始余额
+                percentage,        // 百分比
+                baseAmount,        // 基础金额
+                count,            // 数量
+                amounts           // 生成的金额数组
             });
 
             return amounts;
@@ -3927,7 +3944,8 @@ export class SolanaService {
             logger.error('生成百分比金额失败:', {
                 error: error.message,
                 balance,
-                percentage
+                percentage,
+                count
             });
             throw error;
         }
@@ -4128,13 +4146,16 @@ export class SolanaService {
             });
 
             // 1. 获取主账户信息并检查
-            const mainWallet = await this.walletService.getWallet(mainGroup, mainAccountNumber);
+            const mainWallet = await this.walletService.getWalletKeypair(mainGroup, mainAccountNumber);
             if (!mainWallet) {
                 throw new Error(`Main wallet not found: ${mainGroup}-${mainAccountNumber}`);
             }
 
+            // 2. 确保主钱包的 publicKey 是 PublicKey 实例
+            const mainPublicKey = new PublicKey(mainWallet.publicKey);
+
             // 2. 获取主账户余额
-            const mainBalance = await this.getBalance(mainWallet.publicKey);
+            const mainBalance = await this.getBalance(mainPublicKey);
 
             // 3. 生成买入金额列表
             const buyAmounts = await this.generateBuyAmounts({
@@ -4143,7 +4164,7 @@ export class SolanaService {
                 count: makersCount,
                 balance: mainBalance
             });
-
+            logger.info("buyAmounts",{buyAmounts});
             // 4. 计算总费用 (包含Pump费用和滑点)
             const feeCalculation = await this.calculateMainAccountFees({
                 makersCount,
@@ -4156,7 +4177,7 @@ export class SolanaService {
 
             // 5. 检查主账户余额是否足够
             const balanceCheck = await this.checkSufficientBalance(
-                mainWallet.publicKey,
+                mainPublicKey,
                 feeCalculation.totalRequired
             );
 
@@ -4174,27 +4195,57 @@ export class SolanaService {
             if (createResult.failed > 0) {
                 throw new Error(`Failed to create ${createResult.failed} maker accounts`);
             }
-
+            logger.info("buyAmounts:",{buyAmounts});
+            const buyAmount=buyAmounts[0];
+            const slippage = (options?.slippage || 0) / 10000;
+            // 如果未定义就使用0
+            const accountFees = {
+                gasFee: 0.000005 * 3,
+                jitoTip: jitoTipSol * 3,
+                priorityFee: 0.000001 * 3,
+                pumpFee: buyAmount * 0.01*2,
+                slippageFee: buyAmount * slippage
+            };
+            const ACCOUNT_RENT_EXEMPTION = 0.00203928;
+            //计算总费用
+                const totalFees = accountFees.gasFee+accountFees.pumpFee
+            +accountFees.priorityFee+accountFees.jitoTip+accountFees.slippageFee+ACCOUNT_RENT_EXEMPTION;
+            logger.info("totalFees:",{totalFees});
+            let accountTotalAmounts =totalFees+buyAmount;
+            logger.info("accountTotalAmounts:",{accountTotalAmounts});
             // 7. 主账户向makers账户转账SOL
             const solTransferResult = await this.walletService.oneToMany(
                 mainGroup,
                 mainAccountNumber,
                 tradeGroup,
                 `1-${makersCount}`,
-                buyAmounts
+                accountTotalAmounts
             );
 
             // 8. makers账户批量买入token，加入滑点配置
-            const operations = buyAmounts.map((amount, index) => ({
-                groupType: tradeGroup,
-                accountNumber: index + 1,
-                solAmount: amount,
-                tipAmountSol: jitoTipSol,
-                options: {
-                    slippageBasisPoints: options.slippage || 1000, // 使用传入的滑点或默认10%
-                    priorityFee: true
-                }
-            }));
+            const operations = await Promise.all(
+                Array.from({ length: makersCount }, async (_, index) => {
+                    // 获取对应的 maker 钱包
+                    const wallet = await this.walletService.getWalletKeypair(tradeGroup, index + 1);
+                    if (!wallet) {
+                        throw new Error(`Maker wallet not found: ${tradeGroup}-${index + 1}`);
+                    }
+
+                    return {
+                        wallet,                    // maker 钱包
+                        groupType: tradeGroup,     // 交易组名
+                        accountNumber: index + 1,   // 账户编号从1开始
+                        solAmount: buyAmounts[0], // 对应的买入金额
+                        mint: new PublicKey(mintAddress),
+                        tipAmountSol: jitoTipSol,
+                        options: {
+                            slippageBasisPoints: options.slippage || 1000, // 使用传入的滑点或默认10%
+                            priorityFee: true
+                        }
+                    };
+                })
+            );
+            logger.info("operations:",{operations});
 
             const buyResults = await this.sdk.batchBuy(operations);
 
@@ -4276,43 +4327,59 @@ export class SolanaService {
     }
     // solanaService.js 修改 calculateMainAccountFees 方法
     async calculateMainAccountFees({
-                                       makersCount,
-                                       amountStrategy,
-                                       jitoTipSol,
-                                       amounts,
-                                       mainAccountBalance,
-                                       slippage = 1000 // 默认滑点为10%（以基点为单位，1000 = 10%）
+                                       makersCount,          // makers账户数量
+                                       amountStrategy,       // 金额策略
+                                       jitoTipSol,          // jito小费
+                                       amounts,             // 金额数组
+                                       mainAccountBalance,   // 主账户余额
+                                       slippage = 1000      // 滑点（基点，默认1000 = 10%）
                                    }) {
         try {
-            // 1. 计算创建账户费用(最少需要0.00203928 SOL包含租金)
+            // 输入参数验证
+            if (!makersCount || makersCount <= 0) {
+                throw new Error('无效的makers数量');
+            }
+
+            if (!Array.isArray(amounts)) {
+                throw new Error('金额必须是数组格式');
+            }
+
+            // 过滤掉空值并验证金额
+            const validAmounts = amounts.filter(amount => amount != null && !isNaN(amount) && amount > 0);
+            if (validAmounts.length === 0) {
+                throw new Error('没有提供有效的金额');
+            }
+
+            // 1. 计算创建账户费用（每个账户最少需要0.00203928 SOL作为租金）
             const CREATE_ACCOUNT_FEE = 0.00203928;
             const totalCreateAccountFee = CREATE_ACCOUNT_FEE * makersCount;
 
-            // 2. 计算gas基础费用(每笔交易0.000005 SOL)
+            // 2. 计算基础gas费用（每笔交易0.000005 SOL）
             const GAS_BASE = 0.000005;
-            // 需要的交易次数:创建账户 + 转账SOL + 买入token + 转回token + 关闭账户
+            // 交易次数：创建账户 + 转账SOL + 买入代币 + 转回代币 + 关闭账户
             const totalTransactions = makersCount * 5;
             const totalGasFee = GAS_BASE * totalTransactions;
 
-            // 3. 计算jito小费(每笔交易都需要)
-            const totalJitoTip = jitoTipSol * totalTransactions;
+            // 3. 计算Jito小费（每笔交易）
+            const jitoTipAmount = jitoTipSol || 0.001; // 如果未提供则默认0.001 SOL
+            const totalJitoTip = jitoTipAmount * totalTransactions;
 
-            // 4. 计算优先费用(每笔交易0.000001 SOL)
+            // 4. 计算优先费用（每笔交易0.000001 SOL）
             const PRIORITY_FEE = 0.000001;
             const totalPriorityFee = PRIORITY_FEE * totalTransactions;
 
             // 5. 计算总买入金额
-            const totalBuyAmount = amounts.reduce((sum, amount) => sum + amount, 0);
+            const totalBuyAmount = validAmounts.reduce((sum, amount) => sum + amount, 0);
 
-            // 6. 计算滑点费用 (新增)
-            const slippagePercentage = slippage / 10000; // 转换基点为百分比
+            // 6. 计算滑点成本
+            const slippagePercentage = slippage / 10000; // 将基点转换为百分比
             const slippageCost = totalBuyAmount * slippagePercentage;
 
-            // 7. 计算Pump交易费(1%)
+            // 7. 计算Pump交易费（1%）
             const PUMP_FEE_PERCENTAGE = 0.01;
             const pumpFee = totalBuyAmount * PUMP_FEE_PERCENTAGE;
 
-            // 总费用(SOL)，加入滑点成本
+            // 计算总费用
             const totalFees = totalCreateAccountFee +
                 totalGasFee +
                 totalJitoTip +
@@ -4320,55 +4387,58 @@ export class SolanaService {
                 pumpFee +
                 slippageCost;
 
-            // 总共需要的金额(SOL)
+            // 计算总需求金额
             const totalRequired = totalFees + totalBuyAmount;
 
             // 转换为lamports用于链上操作
             const feesInLamports = Math.ceil(totalFees * LAMPORTS_PER_SOL);
             const totalRequiredInLamports = Math.ceil(totalRequired * LAMPORTS_PER_SOL);
 
+            // 记录费用计算结果
             logger.info('费用计算结果:', {
                 makersCount,
                 slippage: `${slippage/100}%`,
                 fees: {
-                    createAccount: totalCreateAccountFee,
-                    gas: totalGasFee,
-                    jitoTip: totalJitoTip,
-                    priority: totalPriorityFee,
-                    pump: pumpFee,
-                    slippage: slippageCost,
-                    total: totalFees
+                    createAccount: totalCreateAccountFee, // 创建账户费用
+                    gas: totalGasFee,                    // gas费用
+                    jitoTip: totalJitoTip,              // jito小费
+                    priority: totalPriorityFee,          // 优先费用
+                    pump: pumpFee,                       // pump费用
+                    slippage: slippageCost,             // 滑点成本
+                    total: totalFees                     // 总费用
                 },
-                totalBuyAmount,
-                totalRequired,
-                lamports: {
+                totalBuyAmount,                         // 总买入金额
+                totalRequired,                          // 总需求金额
+                lamports: {                             // lamports单位的费用
                     fees: feesInLamports,
                     total: totalRequiredInLamports
                 }
             });
 
+            // 返回计算结果
             return {
                 fees: {
-                    createAccountFee: totalCreateAccountFee,
-                    gasFee: totalGasFee,
-                    jitoTip: totalJitoTip,
-                    priorityFee: totalPriorityFee,
-                    pumpFee: pumpFee,
-                    slippageFee: slippageCost,
-                    total: totalFees
+                    createAccountFee: totalCreateAccountFee,  // 创建账户费用
+                    gasFee: totalGasFee,                     // gas费用
+                    jitoTip: totalJitoTip,                   // jito小费
+                    priorityFee: totalPriorityFee,           // 优先费用
+                    pumpFee: pumpFee,                        // pump费用
+                    slippageFee: slippageCost,              // 滑点费用
+                    total: totalFees                         // 总费用
                 },
-                totalBuyAmount,
-                totalRequired,
-                lamports: {
+                totalBuyAmount,                             // 总买入金额
+                totalRequired,                              // 总需求金额
+                lamports: {                                 // lamports单位的费用
                     fees: feesInLamports,
                     total: totalRequiredInLamports
                 }
             };
 
         } catch (error) {
-            logger.error('计算费用失败:', {
+            logger.error('费用计算失败:', {
                 error: error.message,
                 makersCount,
+                amountStrategy,
                 amounts,
                 slippage
             });

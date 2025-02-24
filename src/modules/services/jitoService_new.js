@@ -28,7 +28,28 @@ export class JitoService {
         };
         this.bestEndpoint = null;
     }
+    async cleanup() {
+        try {
+            logger.info('开始清理 Jito 服务资源');
 
+            // 清理任何活跃的 bundle 监控
+            // 这里可以终止任何正在进行的监控任务
+
+            // 重置服务状态
+            this.bestEndpoint = null;
+
+            // 如果有任何活跃的 WebSocket 连接，关闭它们
+            // 目前的实现没有保持 WebSocket 连接，但如果将来添加了，可以在这里处理
+
+            logger.info('Jito 服务资源清理完成');
+        } catch (error) {
+            logger.error('清理 Jito 服务资源时出错:', {
+                error: error.message,
+                stack: error.stack
+            });
+            // 即使清理失败也不抛出错误，因为这是一个清理操作
+        }
+    }
     /**
      * 初始化服务并选择最佳端点
      */
