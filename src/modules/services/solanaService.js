@@ -1,6 +1,7 @@
 import pkg from '@project-serum/anchor';
-const { BN } = pkg;
-import { EventEmitter } from 'events';
+
+const {BN} = pkg;
+import {EventEmitter} from 'events';
 import {
     Connection,
     Keypair,
@@ -10,15 +11,15 @@ import {
     Transaction as SolanaTransaction,
     SystemProgram
 } from "@solana/web3.js";
-import { AnchorProvider } from "@coral-xyz/anchor";
-import { Wallet } from "@coral-xyz/anchor";
+import {AnchorProvider} from "@coral-xyz/anchor";
+import {Wallet} from "@coral-xyz/anchor";
 import pumpPkg from 'pumpdotfun-sdk';
 
-const { DEFAULT_DECIMALS, MPL_TOKEN_METADATA_PROGRAM_ID } = pumpPkg;
-import { CustomPumpSDK } from './customPumpSDK.js';
-import { logger } from '../utils/index.js';
-import { PinataService } from './pinataService.js';
-import { config } from '../../config/index.js';
+const {DEFAULT_DECIMALS, MPL_TOKEN_METADATA_PROGRAM_ID} = pumpPkg;
+import {CustomPumpSDK} from './customPumpSDK.js';
+import {logger} from '../utils/index.js';
+import {PinataService} from './pinataService.js';
+import {config} from '../../config/index.js';
 import path from 'path';
 import FormData from 'form-data';
 import fetch from 'node-fetch';
@@ -29,17 +30,18 @@ import {
     ASSOCIATED_TOKEN_PROGRAM_ID
 } from "@solana/spl-token";
 import bs58 from 'bs58';
-import { SOLANA_CONFIG } from '../../config/solana.js';
-import { RedisService } from './redisService.js';
+import {SOLANA_CONFIG} from '../../config/solana.js';
+import {RedisService} from './redisService.js';
 import db from '../db/index.js';
-import { ErrorCodes, SolanaServiceError, handleError } from '../utils/errors.js';
-import { AccountLayout } from "@solana/spl-token";
-import { WebSocketManager } from './webSocketManager.js';
-import { CustomError } from '../utils/errors.js';
-import { createRequire } from 'module';
+import {ErrorCodes, SolanaServiceError, handleError} from '../utils/errors.js';
+import {AccountLayout} from "@solana/spl-token";
+import {WebSocketManager} from './webSocketManager.js';
+import {CustomError} from '../utils/errors.js';
+import {createRequire} from 'module';
+
 const require = createRequire(import.meta.url);
-const { Metadata } = require('@metaplex-foundation/mpl-token-metadata');
-const { TokenMetadataProgram } = require('@metaplex-foundation/mpl-token-metadata');
+const {Metadata} = require('@metaplex-foundation/mpl-token-metadata');
+const {TokenMetadataProgram} = require('@metaplex-foundation/mpl-token-metadata');
 
 // 打印出 MPL_TOKEN_METADATA_PROGRAM_ID 的值和类型
 logger.info('Token Metadata Program ID', {
@@ -70,6 +72,7 @@ const validateTransaction = (tx) => {
     if (!tx.accountNumber) throw new Error('Transaction accountNumber is required');
     return true;
 };
+
 export class SolanaService {
     constructor(config) {
         try {
@@ -187,6 +190,7 @@ export class SolanaService {
             this.cleanupStaleSubscriptions();
         }, 300000); // 每5分钟清理一次过期订阅
     }
+
     async cleanupStaleSubscriptions() {
         try {
             const now = Date.now();
@@ -197,7 +201,7 @@ export class SolanaService {
                     try {
                         await this.wsManager.unsubscribeFromAccount(subscription.id);
                         this.activeSubscriptions.delete(key);
-                        logger.debug('清理过期订阅:', { key });
+                        logger.debug('清理过期订阅:', {key});
                     } catch (error) {
                         logger.warn('清理订阅失败:', {
                             key,
@@ -216,6 +220,7 @@ export class SolanaService {
             });
         }
     }
+
     _getWsEndpoint(httpEndpoint) {
         try {
             if (!httpEndpoint) {
@@ -505,7 +510,7 @@ export class SolanaService {
                 await this.redis.set(
                     CACHE_KEYS.BALANCE_SOL(pubKey.toString()),
                     balanceInSOL.toString(),  // 存储 SOL 值
-                    { EX: 60 }
+                    {EX: 60}
                 );
             }
 
@@ -525,23 +530,6 @@ export class SolanaService {
                 ? new PublicKey(publicKey)
                 : publicKey;
 
-            // 从缓存获取余额
-            if (this.redis) {
-                const cachedBalance = await this.redis.get(
-                    CACHE_KEYS.BALANCE_SOL(pubKey.toString())
-                );
-                if (cachedBalance) {
-                    // 缓存中存储的是 SOL，直接返回
-                    const balanceInSOL = parseFloat(cachedBalance);
-                    logger.debug('使用缓存的余额:', {
-                        publicKey: pubKey.toString(),
-                        balanceInSOL,
-                        balanceInLamports: balanceInSOL * LAMPORTS_PER_SOL
-                    });
-                    return balanceInSOL;
-                }
-            }
-
             // 从链上获取余额 (lamports)
             const balanceInLamports = await this.connection.getBalance(pubKey);
             // 转换为 SOL
@@ -558,7 +546,7 @@ export class SolanaService {
                 await this.redis.set(
                     CACHE_KEYS.BALANCE_SOL(pubKey.toString()),
                     balanceInSOL.toString(),  // 存储 SOL 值
-                    { EX: 60 }
+                    {EX: 60}
                 );
             }
 
@@ -608,10 +596,10 @@ export class SolanaService {
     async getTokenBalance(owner, mint) {
         try {
             // 1. 确保参数是 PublicKey 类型
-            const ownerPubkey = typeof owner === 'string' ? new PublicKey(owner) : 
-                               owner instanceof PublicKey ? owner :
-                               owner?.publicKey || null;
-                               
+            const ownerPubkey = typeof owner === 'string' ? new PublicKey(owner) :
+                owner instanceof PublicKey ? owner :
+                    owner?.publicKey || null;
+
             const mintPubkey = typeof mint === 'string' ? new PublicKey(mint) : mint;
 
             if (!ownerPubkey || !mintPubkey) {
@@ -646,6 +634,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     async createToken(groupType, accountNumber, metadata, initialBuyAmount, options = {}) {
         try {
             logger.info('开始创建代币:', {
@@ -718,7 +707,7 @@ export class SolanaService {
         }
     }
 
-    async buyTokens({ groupType, accountNumber, tokenAddress, amountSol, slippage, usePriorityFee, options }) {
+    async buyTokens({groupType, accountNumber, tokenAddress, amountSol, slippage, usePriorityFee, options}) {
         try {
             // 1. Get wallet
             const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
@@ -773,7 +762,7 @@ export class SolanaService {
                         ...result,
                         timestamp: new Date().toISOString()
                     }
-                }, { transaction: dbTransaction });
+                }, {transaction: dbTransaction});
 
                 // 6. Update account balances with transaction
                 await this.updateAccountBalances(
@@ -781,7 +770,7 @@ export class SolanaService {
                     new PublicKey(tokenAddress),
                     result.tokenAmount,
                     amountSol,
-                    { transaction: dbTransaction }
+                    {transaction: dbTransaction}
                 );
 
                 // 7. Setup token tracking and WebSocket subscription
@@ -863,7 +852,7 @@ export class SolanaService {
             // 4. 计算卖出数量(使用 BN 进行安全计算)
             const rawBalanceBN = new BN(tokenBalance.toString());
             const precisionBN = new BN(1_000_000);
-            const percentageBN = new BN(Math.round((percentage/100) * 1_000_000));
+            const percentageBN = new BN(Math.round((percentage / 100) * 1_000_000));
             const sellAmount = rawBalanceBN.mul(percentageBN).div(precisionBN);
 
             // 5. 验证卖出数量
@@ -917,7 +906,7 @@ export class SolanaService {
                         requestedPercentage: percentage,
                         timestamp: new Date().toISOString()
                     }
-                }, { transaction: dbTransaction });
+                }, {transaction: dbTransaction});
 
                 // 11. 更新余额(复用 updateAccountBalances)
                 await this.updateAccountBalances(
@@ -925,7 +914,7 @@ export class SolanaService {
                     new PublicKey(cleanTokenAddress),
                     newTokenBalance,
                     result.solAmount,
-                    { transaction: dbTransaction }
+                    {transaction: dbTransaction}
                 );
 
                 // 12. 更新代币跟踪(复用 setupTokenTracking)
@@ -969,6 +958,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     _parseTokenBalance(balance) {
         try {
             if (typeof balance === 'string' || typeof balance === 'number') {
@@ -1154,6 +1144,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     async findBondingCurveAddress(mint) {
         try {
             logger.info('开始查找绑定曲线地址', {
@@ -1424,7 +1415,7 @@ export class SolanaService {
 
             // 检查余额
             const balanceCheck = await this.checkBalance(fromWallet.publicKey,
-                amount  + (estimatedFee / LAMPORTS_PER_SOL));
+                amount + (estimatedFee / LAMPORTS_PER_SOL));
 
             if (!balanceCheck.hasEnoughBalance) {
                 throw new Error(`Insufficient balance. Need ${(Math.abs(balanceCheck.difference) / LAMPORTS_PER_SOL).toFixed(9)} more SOL`);
@@ -1434,7 +1425,7 @@ export class SolanaService {
             const transaction = new SolanaTransaction();
 
             // 获取最新的 blockhash
-            const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash();
+            const {blockhash, lastValidBlockHeight} = await this.connection.getLatestBlockhash();
 
             // 添加转账指令
             transaction.add(
@@ -1576,7 +1567,7 @@ export class SolanaService {
                 await this.redis.set(
                     CACHE_KEYS.BALANCE_SOL(publicKey.toString()),
                     balanceInSOL.toString(),  // 存储 SOL 值
-                    { EX: 60 }
+                    {EX: 60}
                 );
 
                 logger.debug('余额缓存已更新:', {
@@ -1617,7 +1608,7 @@ export class SolanaService {
             );
 
             // 获取最新的 blockhash
-            const { blockhash } = await this.connection.getLatestBlockhash();
+            const {blockhash} = await this.connection.getLatestBlockhash();
             transaction.recentBlockhash = blockhash;
             transaction.feePayer = fromKeypair.publicKey;
 
@@ -1756,6 +1747,7 @@ export class SolanaService {
             throw serviceError;
         }
     }
+
     async updateAccountBalances(wallet, mint, tokenAmount, solAmount) {
         try {
             logger.info('开始更新账户余额:', {
@@ -1845,7 +1837,7 @@ export class SolanaService {
                         new PublicKey(mint),
                         batchResult.tokenAmount,
                         batchResult.solAmount,
-                        { transaction: dbTransaction }
+                        {transaction: dbTransaction}
                     );
 
                     // 2. Setup token tracking
@@ -1878,7 +1870,7 @@ export class SolanaService {
                             subscriptionId,
                             timestamp: new Date().toISOString()
                         }
-                    }, { transaction: dbTransaction });
+                    }, {transaction: dbTransaction});
 
                     // Commit transaction
                     await dbTransaction.commit();
@@ -1950,7 +1942,7 @@ export class SolanaService {
 
                         // 更新缓存和数据库
                         await this.updateAccountBalances(
-                            { publicKey },
+                            {publicKey},
                             new PublicKey(mint),
                             newBalance.toString()
                         );
@@ -1987,6 +1979,7 @@ export class SolanaService {
             return null;
         }
     }
+
     async batchUpdateBalances(updates) {
         try {
             const results = await Promise.all(
@@ -2010,7 +2003,8 @@ export class SolanaService {
             logger.error('批量更新余额失败:', error);
         }
     }
-    async createAndBuy({ groupType, accountNumber, metadata, solAmount, options = {} }) {
+
+    async createAndBuy({groupType, accountNumber, metadata, solAmount, options = {}}) {
         let mainSubscriptionId = null;
         let batchResults = [];
         let wallet = null;
@@ -2095,8 +2089,8 @@ export class SolanaService {
                         return {
                             wallet,
                             solAmount: tx.solAmount,
-                            groupType:tx.groupType,
-                            accountNumber:tx.accountNumber
+                            groupType: tx.groupType,
+                            accountNumber: tx.accountNumber
                         };
                     })
                 );
@@ -2186,30 +2180,30 @@ export class SolanaService {
 
             // // 13. 处理批量交易记录和余额
             if (result.batchResults?.length > 0) {
-            //     // 记录批量交易到数据库
-            //     const batchTransactions = await Promise.all(
-            //         result.batchResults.map(batchResult =>
-            //             db.models.Transaction.create({
-            //                 signature: batchResult.signature,
-            //                 mint: result.mint,
-            //                 owner: wallet.publicKey.toString(),
-            //                 type: 'create_and_buy',
-            //                 amount: batchResult.solAmount.toString(),
-            //                 tokenAmount: batchResult.tokenAmount.toString(),
-            //                 status: 'success',
-            //                 groupType: batchResult.groupType,
-            //                 accountNumber: batchResult.accountNumber,
-            //                 raw: {
-            //                     ...batchResult,
-            //                     parentSignature: result.signature,
-            //                     timestamp: new Date().toISOString()
-            //                 }
-            //             })
-            //         )
-            //     );
-            //
-            //     // 更新批量交易余额
-            //     await this.batchUpdateBalances(batchTransactions);
+                //     // 记录批量交易到数据库
+                //     const batchTransactions = await Promise.all(
+                //         result.batchResults.map(batchResult =>
+                //             db.models.Transaction.create({
+                //                 signature: batchResult.signature,
+                //                 mint: result.mint,
+                //                 owner: wallet.publicKey.toString(),
+                //                 type: 'create_and_buy',
+                //                 amount: batchResult.solAmount.toString(),
+                //                 tokenAmount: batchResult.tokenAmount.toString(),
+                //                 status: 'success',
+                //                 groupType: batchResult.groupType,
+                //                 accountNumber: batchResult.accountNumber,
+                //                 raw: {
+                //                     ...batchResult,
+                //                     parentSignature: result.signature,
+                //                     timestamp: new Date().toISOString()
+                //                 }
+                //             })
+                //         )
+                //     );
+                //
+                //     // 更新批量交易余额
+                //     await this.batchUpdateBalances(batchTransactions);
 
                 // 处理批量账户的订阅和追踪
                 batchResults = await this.handleBatchAccounts(
@@ -2349,6 +2343,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     // 上传元数据到 IPFS
     async uploadMetadataToIPFS(metadata) {
         try {
@@ -2495,6 +2490,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     // 数据库操作方法
     async saveToken(tokenData) {
         try {
@@ -2662,6 +2658,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     async updateTokenBalanceCache(owner, mint, balance) {
         try {
             if (!this.redis) {
@@ -2696,6 +2693,7 @@ export class SolanaService {
             // 不抛出错误，让流程继续
         }
     }
+
     // 清理方法
     async cleanup() {
         try {
@@ -2703,7 +2701,7 @@ export class SolanaService {
             for (const [key, subId] of this.activeSubscriptions.entries()) {
                 try {
                     await this.wsManager.unsubscribeFromAccount(subId);
-                    logger.debug('清理订阅成功:', { key, subscriptionId: subId });
+                    logger.debug('清理订阅成功:', {key, subscriptionId: subId});
                 } catch (error) {
                     logger.error('清理订阅失败:', {
                         error: error.message,
@@ -2904,7 +2902,7 @@ export class SolanaService {
     // 修改 getTokenPrice 方法，添加缓存检查
     async getTokenPrice(tokenAddress) {
         try {
-            logger.info('获取代币价格:', { tokenAddress });
+            logger.info('获取代币价格:', {tokenAddress});
 
             // 1. 检查缓存
             if (this.redis) {
@@ -2959,7 +2957,7 @@ export class SolanaService {
                 await this.redis.set(
                     `token:price:${tokenAddress}`,
                     JSON.stringify(priceInfo),
-                    { EX: 60 } // 缓存1分钟
+                    {EX: 60} // 缓存1分钟
                 );
             }
 
@@ -3075,7 +3073,7 @@ export class SolanaService {
     }
 
     // 更新节点状态
-    updateNodeStats(endpoint, { success, error, latency }) {
+    updateNodeStats(endpoint, {success, error, latency}) {
         const stats = this.nodeStats.get(endpoint);
         if (!stats) return;
 
@@ -3131,7 +3129,7 @@ export class SolanaService {
                 });
 
                 // 1. 获取最新的 blockhash
-                const { blockhash, lastValidBlockHeight } =
+                const {blockhash, lastValidBlockHeight} =
                     await connection.getLatestBlockhash('confirmed');
 
                 // 2. 设置交易参数
@@ -3150,7 +3148,7 @@ export class SolanaService {
                     }
                 );
 
-                logger.info('交易已发送，等待确认...', { signature });
+                logger.info('交易已发送，等待确认...', {signature});
 
                 // 4. 等待交易确认，使用更长的超时时间
                 const confirmation = await Promise.race([
@@ -3332,6 +3330,7 @@ export class SolanaService {
         });
         return false;
     }
+
     async getTokenInfo(tokenAddress) {
         try {
             // 1. 验证代币地址
@@ -3355,7 +3354,7 @@ export class SolanaService {
 
             const metadataAccount = await this.connection.getAccountInfo(metadataPDA);
             if (!metadataAccount) {
-                logger.warn('代币元数据不存在:', { tokenAddress });
+                logger.warn('代币元数据不存在:', {tokenAddress});
                 // 如果没有元数据，返回基本信息
                 return {
                     address: tokenAddress,
@@ -3410,7 +3409,7 @@ export class SolanaService {
                         totalSupply: bondingCurveAccount.totalSupply?.toString() || '0'
                     };
                 } else {
-                    logger.warn('Bonding curve 账户不存在:', { tokenAddress });
+                    logger.warn('Bonding curve 账户不存在:', {tokenAddress});
                 }
             } catch (bcError) {
                 logger.error('获取 Bonding curve 账户失败:', {
@@ -3532,6 +3531,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     validateBatchResult(batchResult) {
         const errors = [];
 
@@ -3564,11 +3564,12 @@ export class SolanaService {
 
         return true;
     }
+
     async updateTokenBalance(owner, mint) {
         try {
             // 1. 获取最新余额
             const balance = await this.getTokenBalance(owner, mint);
-            
+
             // 2. 更新缓存
             if (this.redis) {
                 const cacheKey = `token:balance:${owner}:${mint}`;
@@ -3602,6 +3603,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     async batchBuyByNumber({
                                groupType,
                                accountNumbers, // 4/50/100/500/1000
@@ -3656,7 +3658,7 @@ export class SolanaService {
             await Promise.all(
                 successful.map(result =>
                     this.updateAccountBalances(
-                        { publicKey: new PublicKey(result.wallet) },
+                        {publicKey: new PublicKey(result.wallet)},
                         new PublicKey(tokenAddress),
                         result.tokenAmount,
                         amountSol
@@ -3751,7 +3753,7 @@ export class SolanaService {
             await Promise.all(
                 successful.map(result =>
                     this.updateAccountBalances(
-                        { publicKey: new PublicKey(result.wallet) },
+                        {publicKey: new PublicKey(result.wallet)},
                         new PublicKey(tokenAddress),
                         null,  // token 余额会通过 WebSocket 更新
                         null   // SOL 余额会通过 WebSocket 更新
@@ -3833,7 +3835,7 @@ export class SolanaService {
             await Promise.all(
                 successful.map(result =>
                     this.updateAccountBalances(
-                        { publicKey: new PublicKey(result.wallet) },
+                        {publicKey: new PublicKey(result.wallet)},
                         new PublicKey(tokenAddress),
                         null,  // token 余额会通过 WebSocket 更新
                         null   // SOL 余额会通过 WebSocket 更新
@@ -3860,6 +3862,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     async generateFixedAmount(amount) {
         try {
             if (typeof amount !== 'number' || amount <= 0) {
@@ -3991,6 +3994,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     async calculateTotalFees({
                                  makersCount,
                                  amountStrategy,
@@ -4123,6 +4127,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     async batchBuyProcess({
                               mainGroup = 'main',           // 主账户组
                               mainAccountNumber,            // 主账户编号
@@ -4142,12 +4147,14 @@ export class SolanaService {
                 makersCount,
                 amountStrategy,
                 jitoTipSol,
-                slippage: `${options.slippage/100}%`
+                slippage: `${options.slippage / 100}%`
             });
 
             // 确保 options.batchTransactions 是一个数组
             options.batchTransactions = options.batchTransactions || [];
-
+            options = options || {};
+            // 确保slippage是数字，默认为1000（10%）
+            options.slippage = typeof options.slippage === 'number' ? options.slippage : 1000;
             // 1. 获取主账户信息并检查
             const mainWallet = await this.walletService.getWalletKeypair(mainGroup, mainAccountNumber);
             if (!mainWallet) {
@@ -4177,59 +4184,82 @@ export class SolanaService {
                 mainAccountBalance: mainBalance,
                 slippage: options.slippage
             });
-
+            const estimatedRent = 0.00203928 * 3 * makersCount; // 约0.002 SOL，根据实际情况调整
             // 5. 检查主账户余额是否足够
             const balanceCheck = await this.checkSufficientBalance(
                 mainPublicKey,
-                feeCalculation.totalRequired
+                feeCalculation.totalRequired + estimatedRent
             );
 
             if (!balanceCheck.isEnough) {
-                throw new Error(`Insufficient balance: Required ${feeCalculation.totalRequired} SOL, ` +
+                throw new Error(`Insufficient balance: Required ${feeCalculation.totalRequired + estimatedRent} SOL, ` +
                     `have ${balanceCheck.balance} SOL, shortfall ${balanceCheck.shortfall} SOL`);
             }
 
             // 6. 创建交易组的makers账户
-            const createResult = await this.walletService.batchCreateWallets(
-                tradeGroup,
-                makersCount
-            );
-
-            if (createResult.failed > 0) {
-                throw new Error(`Failed to create ${createResult.failed} maker accounts`);
+            const createResult = await this.walletService.batchCreateWalletsWithRange(tradeGroup, makersCount);
+            if (createResult.meetsRequirements) {
+                logger.info("创建钱包成功且满足要求:", {
+                    accountRange: createResult.accountRange.range,
+                    start: createResult.accountRange.start,
+                    end: createResult.accountRange.end
+                });
+            } else {
+                throw new Error(`Maker makers账户 创建失败`);
             }
-            logger.info("buyAmounts:", {buyAmounts});
+            // 从买入金额列表中获取单个账户的买入金额
             const buyAmount = buyAmounts[0];
-            const slippage = (options?.slippage || 0) / 10000;
-            // 如果未定义就使用0
-            const accountFees = {
-                gasFee: 0.000005 * 3,
-                jitoTip: jitoTipSol * 3,
-                priorityFee: 0.000001 * 3,
-                pumpFee: buyAmount * 0.01 * 2,
-                slippageFee: buyAmount * slippage
+
+// 费用常量定义
+            const FEE_CONSTANTS = {
+                GAS_FEE_PER_TX: 0.000005,          // 每笔交易的基础 gas 费用
+                PRIORITY_FEE_PER_TX: 0.000001,     // 每笔交易的优先费用
+                PUMP_FEE_PERCENTAGE: 0.01,         // Pump 平台费用百分比 (1%)
+                ACCOUNT_RENT_EXEMPTION: 0.00203928, // 账户租金豁免金额
+                TX_COUNT_PER_ACCOUNT: 3            // 每个账户的预计交易数量
             };
-            const ACCOUNT_RENT_EXEMPTION = 0.00203928;
-            //计算总费用
-            const totalFees = accountFees.gasFee + accountFees.pumpFee
-                + accountFees.priorityFee + accountFees.jitoTip + accountFees.slippageFee + ACCOUNT_RENT_EXEMPTION;
-            logger.info("totalFees:", {totalFees});
-            let accountTotalAmounts = totalFees + buyAmount;
-            logger.info("accountTotalAmounts:", {accountTotalAmounts});
-            // 7. 主账户向makers账户转账SOL
+
+// 计算 slippage 百分比 (将基点转换为小数)
+            const slippagePercentage = (options?.slippage || 0) / 10000;
+
+// 计算每个账户的费用明细
+            const accountFees = {
+                gasFee: FEE_CONSTANTS.GAS_FEE_PER_TX * FEE_CONSTANTS.TX_COUNT_PER_ACCOUNT,
+                jitoTip: jitoTipSol * FEE_CONSTANTS.TX_COUNT_PER_ACCOUNT,
+                priorityFee: FEE_CONSTANTS.PRIORITY_FEE_PER_TX * FEE_CONSTANTS.TX_COUNT_PER_ACCOUNT,
+                pumpFee: buyAmount * FEE_CONSTANTS.PUMP_FEE_PERCENTAGE * 2, // 买入和卖出两次的 pump 费用
+                slippageFee: buyAmount * slippagePercentage,
+                rentExemption: FEE_CONSTANTS.ACCOUNT_RENT_EXEMPTION * FEE_CONSTANTS.TX_COUNT_PER_ACCOUNT
+            };
+
+// 计算总费用
+            const totalFees = Object.values(accountFees).reduce((sum, fee) => sum + fee, 0);
+
+// 计算每个账户需要的总金额 (买入金额 + 所有费用)
+            const accountTotalAmounts = buyAmount + totalFees;
+
+// 记录详细信息
+            logger.info("账户费用计算:", {
+                buyAmount,
+                fees: accountFees,
+                totalFees,
+                accountTotalAmounts,
+                slippagePercentage: `${slippagePercentage * 100}%`
+            });
             const solTransferResult = await this.walletService.oneToMany(
                 mainGroup,
                 mainAccountNumber,
                 tradeGroup,
-                `1-${makersCount}`,
+                createResult.accountRange.range,
                 accountTotalAmounts
             );
 
             // 8. makers账户批量买入token，加入滑点配置
             const operations = await Promise.all(
-                Array.from({ length: makersCount }, async (_, index) => {
+                Array.from({length: createResult.created}, async (_, i) => {
                     // 获取对应的 maker 钱包
-                    const wallet = await this.walletService.getWalletKeypair(tradeGroup, index + 1);
+                    const accountNumber = createResult.accountRange.start + i;
+                    const wallet = await this.walletService.getWalletKeypair(tradeGroup, accountNumber);
                     if (!wallet) {
                         throw new Error(`Maker wallet not found: ${tradeGroup}-${index + 1}`);
                     }
@@ -4237,7 +4267,7 @@ export class SolanaService {
                     return {
                         wallet,                    // maker 钱包
                         groupType: tradeGroup,     // 交易组名
-                        accountNumber: index + 1,   // 账户编号从1开始
+                        accountNumber: i + 1,   // 账户编号从1开始
                         solAmount: buyAmounts[0],   // 对应的买入金额
                         mint: new PublicKey(mintAddress),
                         tipAmountSol: jitoTipSol,
@@ -4252,23 +4282,15 @@ export class SolanaService {
 
             const buyResults = await this.sdk.batchBuy(operations, {
                 bundleMaxSize: 5,         // 指定bundle大小限制
-                waitBetweenBundles: 3000, // 指定bundle间等待时间
+                waitBetweenBundles: 80, // 指定bundle间等待时间
                 maxSolAmount: 1000,       // 指定最大SOL数量限制
                 retryAttempts: 3          // 指定重试次数
             });
 
-            // 9. makers账户将token转回主账户
-            const tokenTransferResult = await this.walletService.manyToOne(
-                tradeGroup,
-                `1-${makersCount}`,
-                mainGroup,
-                mainAccountNumber
-            );
-
-            // 10. 关闭makers账户
+            //9. 关闭makers账户
             const closeResult = await this.walletService.batchCloseWallets(
                 tradeGroup,
-                `1-${makersCount}`,
+                createResult.accountRange.range,
                 mainGroup,
                 mainAccountNumber
             );
@@ -4296,7 +4318,7 @@ export class SolanaService {
                     fees: {
                         ...feeCalculation.fees,
                         pumpFeePercentage: '1%',
-                        slippagePercentage: `${options.slippage/100}%`
+                        slippagePercentage: `${options.slippage / 100}%`
                     },
                     total: feeCalculation.totalRequired
                 },
@@ -4314,21 +4336,26 @@ export class SolanaService {
                             ? buyResults.filter(r => !r.success).length
                             : (buyResults?.success === false ? 1 : 0)
                     },
-                    tokenTransfer: {
-                        // 检查 tokenTransferResult 是否有预期的结构，如果没有则提供默认值
-                        successful: tokenTransferResult?.results?.filter(r => r.status === 'success')?.length || 0,
-                        failed: tokenTransferResult?.results?.filter(r => r.status !== 'success')?.length || 0
+                    closeWallets: {
+                        // 从 closeResult 中获取关闭钱包的结果统计
+                        successful: closeResult.successful.length,
+                        failed: closeResult.failed.length,
+                        skipped: closeResult.skipped.length,
+                        solTransferred: closeResult.summary.solTransferred,
+                        tokensTransferred: closeResult.summary.tokensTransferred.length
                     }
                 },
                 timestamp: new Date().toISOString()
             };
-
+            const slippagePercent = (typeof options.slippage === 'number')
+                ? `${(options.slippage / 100).toFixed(2)}%`
+                : '10.00%';
             logger.info('批量买入流程完成:', {
                 mainAccount: `${mainGroup}-${mainAccountNumber}`,
                 makersCount,
                 successful: result.transactions.tokenBuy.successful,
                 failed: result.transactions.tokenBuy.failed,
-                slippage: `${options.slippage/100}%`
+                slippage: slippagePercent
             });
 
             return result;
@@ -4344,6 +4371,7 @@ export class SolanaService {
             throw error;
         }
     }
+
     // solanaService.js 修改 calculateMainAccountFees 方法
     async calculateMainAccountFees({
                                        makersCount,          // makers账户数量
@@ -4416,7 +4444,7 @@ export class SolanaService {
             // 记录费用计算结果
             logger.info('费用计算结果:', {
                 makersCount,
-                slippage: `${slippage/100}%`,
+                slippage: `${slippage / 100}%`,
                 fees: {
                     createAccount: totalCreateAccountFee, // 创建账户费用
                     gas: totalGasFee,                    // gas费用

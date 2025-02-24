@@ -4122,17 +4122,43 @@ cleanup()
             try {
                 simulation = await this.connection.simulateTransaction(
                     transaction,
-                    {
-                        sigVerify: false,
-                        commitment: 'confirmed',
-                        replaceRecentBlockhash: true
-                    }
+                    [wallet], // Pass wallet as part of an array of signers
+                    false     // includeAccounts parameter
                 );
+                logger.info("simulation",{simulation});
+                logger.info('模拟详细结果:', {
+                    wallet: wallet.publicKey.toString(),
+                    mint: operation.mint.toString(),
+                    buyAmount: operation.buyAmountLamports.toString(),
+                    logs: simulation.value.logs,
+                    err: simulation.value.err,
+                    unitsConsumed: simulation.value.unitsConsumed,
+                    computeUnits: simulation.value.unitsConsumed || 0,
+                    rawResult: JSON.stringify(simulation.value)
+                });
             } catch (simError) {
+                logger.info("Simulation Error Details:", {
+                    message: simError.message,
+                    name: simError.name,
+                    stack: simError.stack,
+                    // For specific Solana error properties
+                    code: simError.code,
+                    logs: simError.logs,
+                    // Stringify the whole error for inspection
+                    fullError: JSON.stringify(simError, Object.getOwnPropertyNames(simError))
+                });
+
+                // Use console.log as a direct fallback
+                console.log("SIMULATION ERROR DETAILS:", {
+                    message: simError.message,
+                    name: simError.name,
+                    stack: simError.stack?.split('\n').slice(0, 3).join('\n')
+                });
                 // 检查是否是速率限制错误
                 if (simError.message.includes('429') ||
                     simError.message.includes('Too Many Requests') ||
                     simError.message.includes('rate limit')) {
+
                     throw simError; // 重新抛出速率限制错误，让调用者处理重试
                 }
 
@@ -4149,6 +4175,16 @@ cleanup()
             const error = simulation.value.err;
 
             if (error) {
+                logger.error('模拟返回错误详情:', {
+                    wallet: wallet.publicKey.toString(),
+                    error: JSON.stringify(error),
+                    errorParsed: this._parseSimulationError(error, logs),
+                    operation: {
+                        mint: operation.mint.toString(),
+                        amount: operation.buyAmountLamports.toString()
+                    },
+                    allLogs: logs // 输出所有日志，不只是最后几条
+                });
                 const errorMessage = this._parseSimulationError(error, logs);
 
                 logger.debug(`交易模拟失败:`, {
@@ -4279,37 +4315,37 @@ cleanup()
                         units: 400000
                     })
                 );
-
-                // 检查并创建ATA账户（如需要）
-                const ataAddress = await this.findAssociatedTokenAddress(
-                    op.wallet.publicKey,
-                    new PublicKey(op.mint)
-                );
-
-                // 验证ATA账户状态
-                const ataAccount = await this.connection.getAccountInfo(ataAddress);
-                if (!ataAccount) {
-                    const createAtaIx = createAssociatedTokenAccountInstruction(
-                        op.wallet.publicKey,
-                        ataAddress,
-                        op.wallet.publicKey,
-                        new PublicKey(op.mint),
-                        TOKEN_PROGRAM_ID,
-                        ASSOCIATED_TOKEN_PROGRAM_ID
-                    );
-                    transaction.add(createAtaIx);
-
-                    logger.debug(`为钱包 ${op.wallet.publicKey.toString()} 添加创建ATA指令`, {
-                        mint: op.mint,
-                        ataAddress: ataAddress.toString()
-                    });
-                }
-
-                // 构建购买指令
-                logger.debug('开始获取全局账户', {
-                    name: "OptimizedApp",
-                    timestamp: new Date().toISOString()
-                });
+                //
+                // // 检查并创建ATA账户（如需要）
+                // const ataAddress = await this.findAssociatedTokenAddress(
+                //     op.wallet.publicKey,
+                //     new PublicKey(op.mint)
+                // );
+                //
+                // // 验证ATA账户状态
+                // const ataAccount = await this.connection.getAccountInfo(ataAddress);
+                // if (!ataAccount) {
+                //     const createAtaIx = createAssociatedTokenAccountInstruction(
+                //         op.wallet.publicKey,
+                //         ataAddress,
+                //         op.wallet.publicKey,
+                //         new PublicKey(op.mint),
+                //         TOKEN_PROGRAM_ID,
+                //         ASSOCIATED_TOKEN_PROGRAM_ID
+                //     );
+                //     transaction.add(createAtaIx);
+                //
+                //     logger.debug(`为钱包 ${op.wallet.publicKey.toString()} 添加创建ATA指令`, {
+                //         mint: op.mint,
+                //         ataAddress: ataAddress.toString()
+                //     });
+                // }
+                //
+                // // 构建购买指令
+                // logger.debug('开始获取全局账户', {
+                //     name: "OptimizedApp",
+                //     timestamp: new Date().toISOString()
+                // });
 
                 const globalAccount = await this.getGlobalAccount();
                 const initialBuyPrice = globalAccount.getInitialBuyPrice(op.buyAmountLamports);

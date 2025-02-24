@@ -934,7 +934,70 @@ export class WalletService {
             throw error;
         }
     }
+    /**
+     * 批量创建钱包并返回账号范围信息
+     * @param {string} groupType - 钱包组类型
+     * @param {number} count - 需要创建的钱包数量
+     * @returns {Object} 包含创建结果和账号范围信息的对象
+     */
+    async batchCreateWalletsWithRange(groupType, count) {
+        try {
+            // 验证输入
+            if (typeof count !== 'number' || count < 1 || count > 100) {
+                throw new Error('Count must be between 1 and 100');
+            }
 
+            // 调用原有方法创建钱包
+            const createResults = await this.batchCreateWallets(groupType, count);
+
+            // 确定起始和结束账号
+            let startAccount = null;
+            let endAccount = null;
+
+            if (createResults.wallets && createResults.wallets.length > 0) {
+                const accountNumbers = createResults.wallets.map(wallet => wallet.accountNumber);
+                startAccount = Math.min(...accountNumbers);
+                endAccount = Math.max(...accountNumbers);
+            }
+
+            // 构建返回结果
+            const result = {
+                ...createResults,
+                accountRange: {
+                    start: startAccount,
+                    end: endAccount,
+                    range: (startAccount !== null && endAccount !== null) ?
+                        `${startAccount}-${endAccount}` : null
+                }
+            };
+
+            // 验证是否满足要求：创建成功且创建数量等于请求数量
+            result.meetsRequirements = (
+                result.success &&
+                result.created === count &&
+                result.accountRange.start !== null &&
+                result.accountRange.end !== null
+            );
+
+            logger.info('批量创建钱包完成:', {
+                groupType,
+                count,
+                created: createResults.created,
+                accountRange: result.accountRange,
+                meetsRequirements: result.meetsRequirements
+            });
+
+            return result;
+        } catch (error) {
+            logger.error('批量创建钱包失败:', {
+                error: error.message,
+                stack: error.stack,
+                groupType,
+                count
+            });
+            throw error;
+        }
+    }
     // 3. 转账功能
     async transfer(fromGroup, fromAccount, toGroup, toAccount, amount) {
         try {
@@ -2779,7 +2842,146 @@ export class WalletService {
 
         return transfers;
     }
+    async transferToken(fromGroupType, fromAccountNumber, toGroupType, toAccountNumber, mintAddress, amount) {
+        try {
+            logger.info('开始代币转账:', {
+                fromGroupType,
+                fromAccountNumber,
+                toGroupType,
+                toAccountNumber,
+                mintAddress,
+                amount
+            });
 
+            // 获取源钱包和目标钱包
+            const [fromWallet, toWallet] = await Promise.all([
+                this.getWalletKeypair(fromGroupType, fromAccountNumber),
+                this.getWallet(toGroupType, toAccountNumber)
+            ]);
+
+            if (!fromWallet || !toWallet) {
+                throw new Error('Source or destination wallet not found');
+            }
+
+            // 创建 PublicKey 对象
+            const mintPublicKey = new PublicKey(mintAddress);
+            const fromPublicKey = fromWallet.publicKey;
+            const toPublicKey = new PublicKey(toWallet.publicKey);
+
+            // 获取源账户和目标账户的关联代币账户
+            const fromTokenAccount = await getAssociatedTokenAddress(
+                mintPublicKey,
+                fromPublicKey
+            );
+
+            const toTokenAccount = await getAssociatedTokenAddress(
+                mintPublicKey,
+                toPublicKey
+            );
+
+            // 创建转账交易
+            const transaction = new Transaction();
+
+            // 检查目标代币账户是否存在，不存在则创建
+            try {
+                await getAccount(
+                    this.connection,
+                    toTokenAccount,
+                    'confirmed',
+                    TOKEN_PROGRAM_ID
+                );
+            } catch (error) {
+                // 如果账户不存在，添加创建关联代币账户的指令
+                transaction.add(
+                    createAssociatedTokenAccountInstruction(
+                        fromPublicKey,
+                        toTokenAccount,
+                        toPublicKey,
+                        mintPublicKey,
+                        TOKEN_PROGRAM_ID,
+                        ASSOCIATED_TOKEN_PROGRAM_ID
+                    )
+                );
+            }
+
+            // 获取代币精度
+            const mintInfo = await getMint(
+                this.connection,
+                mintPublicKey,
+                'confirmed',
+                TOKEN_PROGRAM_ID
+            );
+
+            // 计算转账金额（考虑精度）
+            const transferAmount = amount * Math.pow(10, mintInfo.decimals);
+
+            // 添加转账指令
+            transaction.add(
+                createTransferInstruction(
+                    fromTokenAccount,
+                    toTokenAccount,
+                    fromPublicKey,
+                    BigInt(Math.floor(transferAmount)),
+                    [],
+                    TOKEN_PROGRAM_ID
+                )
+            );
+
+            // 获取最新的 blockhash
+            const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash();
+            transaction.recentBlockhash = blockhash;
+            transaction.feePayer = fromPublicKey;
+
+            // 签名交易
+            transaction.sign(fromWallet);
+
+            // 发送交易
+            const signature = await this.connection.sendRawTransaction(
+                transaction.serialize(),
+                {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed'
+                }
+            );
+
+            // 确认交易
+            const confirmation = await this.connection.confirmTransaction({
+                signature,
+                blockhash,
+                lastValidBlockHeight
+            });
+
+            logger.info('代币转账成功:', {
+                signature,
+                fromPublicKey: fromPublicKey.toString(),
+                toPublicKey: toPublicKey.toString(),
+                mintAddress,
+                amount,
+                confirmation
+            });
+
+            return {
+                success: true,
+                signature,
+                fromPublicKey: fromPublicKey.toString(),
+                toPublicKey: toPublicKey.toString(),
+                mintAddress,
+                amount
+            };
+        } catch (error) {
+            logger.error('代币转账失败:', {
+                error: error.message,
+                stack: error.stack,
+                fromGroupType,
+                fromAccountNumber,
+                toGroupType,
+                toAccountNumber,
+                mintAddress,
+                amount
+            });
+            throw error;
+        }
+    }
     // 获取批处理配置
     _getBatchCloseConfig(totalAccounts) {
         if (totalAccounts <= 4) return BATCH_CLOSE_CONFIG.SMALL;
