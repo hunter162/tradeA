@@ -4247,7 +4247,12 @@ export class SolanaService {
             );
             logger.info("operations:",{operations});
 
-            const buyResults = await this.sdk.batchBuy(operations);
+            const buyResults = await this.sdk.batchBuy(operations, {
+                bundleMaxSize: 5,         // 指定bundle大小限制
+                waitBetweenBundles: 3000, // 指定bundle间等待时间
+                maxSolAmount: 1000,       // 指定最大SOL数量限制
+                retryAttempts: 3          // 指定重试次数
+            });
 
             // 9. makers账户将token转回主账户
             const tokenTransferResult = await this.walletService.manyToOne(
