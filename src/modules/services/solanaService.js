@@ -4145,6 +4145,9 @@ export class SolanaService {
                 slippage: `${options.slippage/100}%`
             });
 
+            // 确保 options.batchTransactions 是一个数组
+            options.batchTransactions = options.batchTransactions || [];
+
             // 1. 获取主账户信息并检查
             const mainWallet = await this.walletService.getWalletKeypair(mainGroup, mainAccountNumber);
             if (!mainWallet) {
@@ -4164,7 +4167,7 @@ export class SolanaService {
                 count: makersCount,
                 balance: mainBalance
             });
-            logger.info("buyAmounts",{buyAmounts});
+            logger.info("buyAmounts", {buyAmounts});
             // 4. 计算总费用 (包含Pump费用和滑点)
             const feeCalculation = await this.calculateMainAccountFees({
                 makersCount,
@@ -4195,24 +4198,24 @@ export class SolanaService {
             if (createResult.failed > 0) {
                 throw new Error(`Failed to create ${createResult.failed} maker accounts`);
             }
-            logger.info("buyAmounts:",{buyAmounts});
-            const buyAmount=buyAmounts[0];
+            logger.info("buyAmounts:", {buyAmounts});
+            const buyAmount = buyAmounts[0];
             const slippage = (options?.slippage || 0) / 10000;
             // 如果未定义就使用0
             const accountFees = {
                 gasFee: 0.000005 * 3,
                 jitoTip: jitoTipSol * 3,
                 priorityFee: 0.000001 * 3,
-                pumpFee: buyAmount * 0.01*2,
+                pumpFee: buyAmount * 0.01 * 2,
                 slippageFee: buyAmount * slippage
             };
             const ACCOUNT_RENT_EXEMPTION = 0.00203928;
             //计算总费用
-                const totalFees = accountFees.gasFee+accountFees.pumpFee
-            +accountFees.priorityFee+accountFees.jitoTip+accountFees.slippageFee+ACCOUNT_RENT_EXEMPTION;
-            logger.info("totalFees:",{totalFees});
-            let accountTotalAmounts =totalFees+buyAmount;
-            logger.info("accountTotalAmounts:",{accountTotalAmounts});
+            const totalFees = accountFees.gasFee + accountFees.pumpFee
+                + accountFees.priorityFee + accountFees.jitoTip + accountFees.slippageFee + ACCOUNT_RENT_EXEMPTION;
+            logger.info("totalFees:", {totalFees});
+            let accountTotalAmounts = totalFees + buyAmount;
+            logger.info("accountTotalAmounts:", {accountTotalAmounts});
             // 7. 主账户向makers账户转账SOL
             const solTransferResult = await this.walletService.oneToMany(
                 mainGroup,
@@ -4235,7 +4238,7 @@ export class SolanaService {
                         wallet,                    // maker 钱包
                         groupType: tradeGroup,     // 交易组名
                         accountNumber: index + 1,   // 账户编号从1开始
-                        solAmount: buyAmounts[0], // 对应的买入金额
+                        solAmount: buyAmounts[0],   // 对应的买入金额
                         mint: new PublicKey(mintAddress),
                         tipAmountSol: jitoTipSol,
                         options: {
@@ -4245,7 +4248,7 @@ export class SolanaService {
                     };
                 })
             );
-            logger.info("operations:",{operations});
+            logger.info("operations:", {operations});
 
             const buyResults = await this.sdk.batchBuy(operations, {
                 bundleMaxSize: 5,         // 指定bundle大小限制
@@ -4270,6 +4273,11 @@ export class SolanaService {
                 mainAccountNumber
             );
 
+            logger.info("buyResults:", {
+                type: typeof buyResults,
+                isArray: Array.isArray(buyResults),
+                value: buyResults
+            });
             // 整理执行结果
             const result = {
                 mainAccount: {
@@ -4294,16 +4302,22 @@ export class SolanaService {
                 },
                 transactions: {
                     solTransfer: {
-                        successful: solTransferResult.successful.length,
-                        failed: solTransferResult.failed.length
+                        successful: solTransferResult.successful?.length || 0,
+                        failed: solTransferResult.failed?.length || 0
                     },
                     tokenBuy: {
-                        successful: buyResults.filter(r => r.success).length,
-                        failed: buyResults.filter(r => !r.success).length
+                        // 检查 buyResults 是否为数组，如果不是则尝试从对象中提取信息
+                        successful: Array.isArray(buyResults)
+                            ? buyResults.filter(r => r.success).length
+                            : (buyResults?.success ? 1 : 0),
+                        failed: Array.isArray(buyResults)
+                            ? buyResults.filter(r => !r.success).length
+                            : (buyResults?.success === false ? 1 : 0)
                     },
                     tokenTransfer: {
-                        successful: tokenTransferResult.successful.length,
-                        failed: tokenTransferResult.failed.length
+                        // 检查 tokenTransferResult 是否有预期的结构，如果没有则提供默认值
+                        successful: tokenTransferResult?.results?.filter(r => r.status === 'success')?.length || 0,
+                        failed: tokenTransferResult?.results?.filter(r => r.status !== 'success')?.length || 0
                     }
                 },
                 timestamp: new Date().toISOString()
