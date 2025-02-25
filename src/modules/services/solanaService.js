@@ -2522,27 +2522,70 @@ export class SolanaService {
 
     async saveTransaction(txData) {
         try {
-            const transaction = await db.models.Transaction.create({
+            // 首先打印完整的 txData 用于调试
+            logger.debug('保存交易数据:', {
+                ...txData,
+                raw: undefined // 避免日志过大
+            });
+
+            // 添加数据验证和默认值处理
+            const transactionData = {
                 signature: txData.signature,
                 mint: txData.mint,
                 owner: txData.owner,
                 type: txData.type,
-                amount: txData.solAmount,
+                // 安全地处理数值转换
+                amount: typeof txData.solAmount !== 'undefined'
+                    ? txData.solAmount.toString()
+                    : '0',  // 设置默认值
+                tokenAmount: txData.tokenAmount
+                    ? txData.tokenAmount.toString()
+                    : '0',
+                tokenDecimals: txData.tokenDecimals || 6, // 默认 6 位小数
                 status: txData.success ? 'success' : 'failed',
-                timestamp: new Date(txData.timestamp),
-                raw: txData
-            });
+                // 安全地处理可选字段
+                pricePerToken: txData.pricePerToken
+                    ? txData.pricePerToken.toString()
+                    : null,
+                slippage: txData.slippage || 0,
+                raw: {
+                    ...txData,
+                    timestamp: new Date().toISOString(),
+                    groupType: txData.groupType,
+                    accountNumber: txData.accountNumber,
+                    percentage: txData.percentage // 保存卖出百分比
+                },
+                createdAt: new Date(),
+                updatedAt: new Date()
+            };
+
+            // 验证必要字段
+            if (!transactionData.signature || !transactionData.mint || !transactionData.owner) {
+                throw new Error('缺少必要字段: signature, mint 或 owner');
+            }
+
+            const transaction = await db.models.Transaction.create(transactionData);
 
             logger.info('交易记录保存成功:', {
                 signature: transaction.signature,
-                type: transaction.type
+                type: transaction.type,
+                groupType: txData.groupType,
+                accountNumber: txData.accountNumber
             });
 
             return transaction;
         } catch (error) {
             logger.error('保存交易记录失败:', {
                 error: error.message,
-                txData
+                txData: JSON.stringify({
+                    signature: txData.signature,
+                    mint: txData.mint,
+                    owner: txData.owner,
+                    type: txData.type,
+                    // 只记录关键字段，避免日志过大
+                    groupType: txData.groupType,
+                    accountNumber: txData.accountNumber
+                })
             });
             throw error;
         }
@@ -4159,17 +4202,9 @@ export class SolanaService {
                    }) {
         try {
             // 1. 参数验证和标准化
-            if (!buyerGroup) {
-                throw new Error('买入钱包所属组(buyerGroup)为必填项');
-            }
-
-            if (!accountRange) {
-                throw new Error('账户范围(accountRange)为必填项');
-            }
-
-            if (!mintAddress) {
-                throw new Error('代币地址(mintAddress)为必填项');
-            }
+            if (!buyerGroup) throw new Error('买入钱包所属组(buyerGroup)为必填项');
+            if (!accountRange) throw new Error('账户范围(accountRange)为必填项');
+            if (!mintAddress) throw new Error('代币地址(mintAddress)为必填项');
 
             // 确保代币地址有效
             try {
@@ -4178,7 +4213,7 @@ export class SolanaService {
                 throw new Error(`无效的代币地址: ${mintAddress}`);
             }
 
-            // 检查至少提供了一种金额策略
+            // 检查金额策略
             const amountStrategyCount = [
                 fixedAmount !== undefined,
                 randomRange !== undefined,
@@ -4188,9 +4223,8 @@ export class SolanaService {
             if (amountStrategyCount === 0) {
                 throw new Error('必须提供一种金额策略: fixedAmount, randomRange 或 percentageOfBalance');
             }
-
             if (amountStrategyCount > 1) {
-                throw new Error('只能提供一种金额策略: fixedAmount, randomRange 或 percentageOfBalance');
+                throw new Error('只能提供一种金额策略');
             }
 
             // 标准化选项
@@ -4206,30 +4240,14 @@ export class SolanaService {
 
             const txOptions = { ...defaultOptions, ...options };
 
-            // 确保滑点在有效范围内
             if (txOptions.slippage < 0 || txOptions.slippage > 10000) {
                 throw new Error('滑点(slippage)必须在0-10000基点范围内');
             }
 
-            // 2. 转换账户范围为账户数组
-            let accountNumbers = [];
-
-            if (Array.isArray(accountRange)) {
-                // 如果是数组，直接使用
-                accountNumbers = accountRange;
-            } else if (typeof accountRange === 'object' && 'start' in accountRange && 'end' in accountRange) {
-                // 如果是{start, end}对象，生成范围内所有数字
-                const { start, end } = accountRange;
-                if (typeof start !== 'number' || typeof end !== 'number' || start > end) {
-                    throw new Error('账户范围无效: start必须小于等于end');
-                }
-
-                for (let i = start; i <= end; i++) {
-                    accountNumbers.push(i);
-                }
-            } else {
-                throw new Error('账户范围格式无效，必须是数组或{start, end}对象');
-            }
+            // 2. 转换账户范围
+            let accountNumbers = Array.isArray(accountRange) ?
+                accountRange :
+                Array.from({length: accountRange.end - accountRange.start + 1}, (_, i) => accountRange.start + i);
 
             if (accountNumbers.length === 0) {
                 throw new Error('账户范围不能为空');
@@ -4249,7 +4267,7 @@ export class SolanaService {
                 }
             });
 
-            // 3. 获取所有钱包并检查
+            // 3. 获取钱包信息
             const wallets = [];
             const skippedAccounts = [];
 
@@ -4283,9 +4301,8 @@ export class SolanaService {
                 throw new Error('没有有效的钱包可用于交易');
             }
 
-            // 4. 获取所有钱包余额
+            // 4. 获取钱包余额
             const walletBalances = [];
-
             for (const walletInfo of wallets) {
                 try {
                     const balance = await this.getBalance(walletInfo.wallet.publicKey);
@@ -4304,41 +4321,19 @@ export class SolanaService {
                 }
             }
 
-            // 5. 确定金额策略并生成金额
-            let amountStrategy;
-            let amountParams = {};
-
-            if (fixedAmount !== undefined) {
-                amountStrategy = 'fixed';
-                amountParams.fixedAmount = fixedAmount;
-            } else if (randomRange !== undefined) {
-                amountStrategy = 'random';
-                amountParams.minAmount = randomRange.min;
-                amountParams.maxAmount = randomRange.max;
-            } else if (percentageOfBalance !== undefined) {
-                amountStrategy = 'percentage';
-                amountParams.percentage = percentageOfBalance;
-            }
-
-            // 为每个钱包生成买入金额
+            // 5. 生成买入金额
             const walletsWithAmounts = [];
-
             for (const walletInfo of walletBalances) {
                 try {
                     let buyAmount;
-
-                    switch (amountStrategy) {
-                        case 'fixed':
-                            buyAmount = fixedAmount;
-                            break;
-                        case 'random':
-                            buyAmount = randomRange.min + Math.random() * (randomRange.max - randomRange.min);
-                            buyAmount = parseFloat(buyAmount.toFixed(9)); // SOL精度为9位
-                            break;
-                        case 'percentage':
-                            buyAmount = (walletInfo.balance * percentageOfBalance) / 100;
-                            buyAmount = parseFloat(buyAmount.toFixed(9));
-                            break;
+                    if (fixedAmount !== undefined) {
+                        buyAmount = fixedAmount;
+                    } else if (randomRange !== undefined) {
+                        buyAmount = randomRange.min + Math.random() * (randomRange.max - randomRange.min);
+                        buyAmount = parseFloat(buyAmount.toFixed(9));
+                    } else if (percentageOfBalance !== undefined) {
+                        buyAmount = (walletInfo.balance * percentageOfBalance) / 100;
+                        buyAmount = parseFloat(buyAmount.toFixed(9));
                     }
 
                     walletsWithAmounts.push({
@@ -4356,78 +4351,51 @@ export class SolanaService {
                 }
             }
 
-            // 6. 计算每个钱包需要的总费用和验证余额
+            // 6. 验证余额并准备交易
             const validWallets = [];
             const insufficientFundsWallets = [];
 
-            // 预估费用因子
-            const FEE_CONSTANTS = {
-                ACCOUNT_FEE: 0.00203928*3,          // 创建账户费用
-                TRANSACTION_FEE: 0.000005,        // 交易基础费用
-                PRIORITY_FEE: 0.000001,           // 优先费
-                PUMP_FEE_PERCENTAGE: 0.01,        // Pump平台费用百分比(1%)
-                COMPUTE_UNIT_PRICE: 0.0000000015, // 计算单元价格 (microlamports)
-                COMPUTE_UNITS_BUY: 200000,        // 预估的买入操作计算单元
-                BUFFER: 0.002                     // 额外缓冲金额
-            };
-
             for (const walletInfo of walletsWithAmounts) {
                 try {
-                    // 计算滑点成本
-                    const slippageCost = (walletInfo.buyAmount * txOptions.slippage) / 10000;
+                    // 将 SOL 金额转换为 lamports
+                    const amountLamports = BigInt(Math.floor(walletInfo.buyAmount * LAMPORTS_PER_SOL));
 
-                    // 计算平台费用
-                    const pumpFee = walletInfo.buyAmount * FEE_CONSTANTS.PUMP_FEE_PERCENTAGE;
+                    // 获取当前余额(lamports)
+                    const currentBalanceLamports = BigInt(Math.floor(walletInfo.balance * LAMPORTS_PER_SOL));
 
-                    // 计算优先费用(如果启用)
-                    const priorityFee = txOptions.usePriorityFee ? txOptions.jitoTipSol : 0;
+                    // 使用SDK计算费用
+                    const fees = await this.sdk.calculateTransactionFees(amountLamports, txOptions);
+                    const totalRequiredLamports = amountLamports + fees.total;
 
-                    // 计算交易基础费用
-                    const transactionFee = FEE_CONSTANTS.TRANSACTION_FEE;
-
-                    // 计算计算单元费用
-                    const computeUnitFee = FEE_CONSTANTS.COMPUTE_UNIT_PRICE * FEE_CONSTANTS.COMPUTE_UNITS_BUY;
-
-                    // 计算总费用 (不包括账户费用，因为我们使用现有钱包)
-                    const totalFees = transactionFee + priorityFee + pumpFee + slippageCost + computeUnitFee + FEE_CONSTANTS.BUFFER;
-
-                    // 计算总需求金额
-                    const totalRequired = walletInfo.buyAmount + totalFees;
-
-                    // 验证余额是否足够
-                    const hasEnoughBalance = walletInfo.balance >= totalRequired;
-
-                    if (hasEnoughBalance) {
+                    // 验证余额
+                    if (currentBalanceLamports >= totalRequiredLamports) {
                         validWallets.push({
                             ...walletInfo,
-                            totalRequired,
-                            fees: {
-                                transactionFee,
-                                priorityFee,
-                                pumpFee,
-                                slippageCost,
-                                computeUnitFee,
-                                buffer: FEE_CONSTANTS.BUFFER,
-                                total: totalFees
-                            }
+                            amountLamports,
+                            currentBalanceLamports,
+                            fees,
+                            totalRequired: totalRequiredLamports
                         });
                     } else {
                         insufficientFundsWallets.push({
                             accountNumber: walletInfo.accountNumber,
                             publicKey: walletInfo.publicKey,
                             balance: walletInfo.balance,
-                            totalRequired,
-                            shortfall: totalRequired - walletInfo.balance,
-                            reason: `余额不足: 需要 ${totalRequired.toFixed(9)} SOL, 当前 ${walletInfo.balance.toFixed(9)} SOL`
+                            balanceLamports: currentBalanceLamports.toString(),
+                            required: totalRequiredLamports.toString(),
+                            shortfall: (totalRequiredLamports - currentBalanceLamports).toString(),
+                            reason: `余额不足: 需要 ${totalRequiredLamports} lamports, 当前 ${currentBalanceLamports} lamports`
                         });
                     }
                 } catch (error) {
-                    logger.warn(`计算费用失败: ${walletInfo.publicKey}`, {
-                        error: error.message
+                    logger.warn(`验证余额失败: ${walletInfo.publicKey}`, {
+                        error: error.message,
+                        balance: walletInfo.balance,
+                        buyAmount: walletInfo.buyAmount
                     });
                     skippedAccounts.push({
                         accountNumber: walletInfo.accountNumber,
-                        reason: `计算费用失败: ${error.message}`
+                        reason: `验证余额失败: ${error.message}`
                     });
                 }
             }
@@ -4437,31 +4405,39 @@ export class SolanaService {
             }
 
             // 7. 准备批量买入操作
-            const operations = validWallets.map(walletInfo => ({
-                wallet: walletInfo.wallet,
-                mint: new PublicKey(mintAddress),
-                amountSol: walletInfo.buyAmount,
-                slippageBasisPoints: txOptions.slippage,
-                // 优先上链参数
-                priorityFee: txOptions.usePriorityFee ? {
-                    microLamports: Math.floor(txOptions.jitoTipSol * 1e6)
-                } : undefined,
-                // Jito tip金额
-                tipAmountSol: txOptions.usePriorityFee ? txOptions.jitoTipSol : 0,
-                // 是否使用优先上链
-                usePriorityFee: txOptions.usePriorityFee,
-                options: {
-                    skipPreflight: txOptions.skipPreflight
-                }
-            }));
+            const operations = validWallets.map(walletInfo => {
+                // 转换所有金额为lamports
+                const amountLamports = BigInt(Math.floor(walletInfo.buyAmount * LAMPORTS_PER_SOL));
 
-            logger.info('准备执行批量买入:', {
-                totalWallets: wallets.length,
-                validWallets: validWallets.length,
-                insufficientFunds: insufficientFundsWallets.length,
-                skipped: skippedAccounts.length,
-                bundleSize: txOptions.bundleSize,
-                usePriorityFee: txOptions.usePriorityFee
+                return {
+                    wallet: walletInfo.wallet,
+                    mint: new PublicKey(mintAddress),
+                    amountSol: walletInfo.buyAmount,
+                    amountLamports: amountLamports,
+                    // 添加费用计算结果
+                    fees: walletInfo.fees,
+                    totalRequired: walletInfo.totalRequired,
+                    // 其他参数
+                    slippageBasisPoints: txOptions.slippage,
+                    priorityFee: txOptions.usePriorityFee ? {
+                        microLamports: Math.floor(txOptions.jitoTipSol * 1e6)
+                    } : undefined,
+                    tipAmountSol: txOptions.usePriorityFee ? txOptions.jitoTipSol : 0,
+                    usePriorityFee: txOptions.usePriorityFee,
+                    options: {
+                        skipPreflight: txOptions.skipPreflight
+                    }
+                };
+            });
+
+            logger.info('准备批量买入操作:', {
+                operationsCount: operations.length,
+                firstOperation: {
+                    wallet: operations[0]?.wallet.publicKey.toString(),
+                    amountSol: operations[0]?.amountSol,
+                    fees: operations[0]?.fees,
+                    totalRequired: operations[0]?.totalRequired?.toString()
+                }
             });
 
             // 8. 执行批量买入
@@ -4470,11 +4446,10 @@ export class SolanaService {
                 waitBetweenBundles: txOptions.waitBetweenMs,
                 retryAttempts: txOptions.retryAttempts,
                 skipPreflight: txOptions.skipPreflight,
-                usePriorityFee: txOptions.usePriorityFee, // 是否使用优先上链
-                normalSubmission: !txOptions.usePriorityFee // 是否使用普通上链
+                usePriorityFee: txOptions.usePriorityFee,
+                normalSubmission: !txOptions.usePriorityFee
             };
 
-            // 调用SDK的批量买入方法
             const batchResults = await this.sdk.batchBuyDirect(operations, batchBuyOptions);
 
             // 9. 处理结果
@@ -4493,28 +4468,35 @@ export class SolanaService {
                         tokenAmount: result.tokenAmount,
                         timestamp: result.timestamp || new Date().toISOString()
                     });
-
+                    await this.saveTransaction({
+                        signature: result.signature,
+                        mint: mintAddress,
+                        owner: result.wallet,
+                        type: 'buy',
+                        solAmount: result.amountSol,
+                        tokenAmount: result.tokenAmount,
+                        tokenDecimals: result.tokenDecimals || 6, // Solana 默认 6 位小数
+                        success: true,
+                        pricePerToken: result.pricePerToken,
+                        slippage: options.slippage || 1000, // 默认 10%
+                        groupType: buyerGroup,
+                        accountNumber: result.accountNumber
+                    });
                     // 更新账户余额
-                    try {
-                        if (walletInfo) {
-                            await this.updateAccountBalances(
-                                walletInfo.wallet,
-                                new PublicKey(mintAddress),
-                                result.tokenAmount,
-                                walletInfo.buyAmount
-                            );
+                    if (walletInfo) {
+                        await this.updateAccountBalances(
+                            walletInfo.wallet,
+                            new PublicKey(mintAddress),
+                            result.tokenAmount,
+                            walletInfo.buyAmount
+                        );
 
-                            // 设置代币订阅
-                            await this.setupTokenTracking(
-                                result.wallet,
-                                mintAddress,
-                                result.tokenAmount || '0'
-                            );
-                        }
-                    } catch (error) {
-                        logger.warn(`更新账户余额失败: ${result.wallet}`, {
-                            error: error.message
-                        });
+                        // 设置代币订阅
+                        await this.setupTokenTracking(
+                            result.wallet,
+                            mintAddress,
+                            result.tokenAmount || '0'
+                        );
                     }
                 } else {
                     failedTransactions.push({
@@ -4526,8 +4508,8 @@ export class SolanaService {
                 }
             }
 
-            // 10. 返回最终结果
-            const finalResult = {
+            // 10. 返回结果
+            return {
                 success: successfulTransactions.length > 0,
                 summary: {
                     total: wallets.length,
@@ -4547,16 +4529,6 @@ export class SolanaService {
                 timestamp: new Date().toISOString()
             };
 
-            logger.info('批量买入完成:', {
-                mintAddress,
-                totalWallets: wallets.length,
-                successful: successfulTransactions.length,
-                failed: failedTransactions.length,
-                skipped: finalResult.summary.skipped,
-                usedPriorityFee: txOptions.usePriorityFee
-            });
-
-            return finalResult;
         } catch (error) {
             logger.error('批量买入失败:', {
                 error: error.message,
@@ -4941,8 +4913,10 @@ export class SolanaService {
                         percentage,
                         options = {}
                     }) {
+        const startTime = Date.now();
+
         try {
-            // 1. 参数验证和标准化
+            // 1. 参数验证
             if (!sellerGroup) {
                 throw new Error('卖出钱包所属组(sellerGroup)为必填项');
             }
@@ -4963,36 +4937,35 @@ export class SolanaService {
             }
 
             // 验证百分比参数
-            if (typeof percentage !== 'number' || percentage <= 0 || percentage > 100) {
-                throw new Error(`无效的百分比值: ${percentage}，必须在1到100之间`);
+            if (typeof percentage !== 'number' || percentage < 0 || percentage > 100) {
+                throw new Error(`无效的百分比值: ${percentage}，必须在0到100之间`);
             }
 
             // 标准化选项
             const defaultOptions = {
-                slippage: 1000,         // 10%
+                slippageBasisPoints: 1000,  // 10%
                 usePriorityFee: false,
                 jitoTipSol: 0.001,
-                bundleSize: 5,
-                waitBetweenMs: 80,
+                bundleMaxSize: 5,
+                waitBetweenBundles: 80,
                 retryAttempts: 3,
-                skipPreflight: false
+                skipPreflight: false,
+                preflightCommitment: 'confirmed'
             };
 
             const txOptions = { ...defaultOptions, ...options };
 
             // 确保滑点在有效范围内
-            if (txOptions.slippage < 0 || txOptions.slippage > 10000) {
-                throw new Error('滑点(slippage)必须在0-10000基点范围内');
+            if (txOptions.slippageBasisPoints < 0 || txOptions.slippageBasisPoints > 10000) {
+                throw new Error('滑点(slippageBasisPoints)必须在0-10000基点范围内');
             }
 
             // 2. 转换账户范围为账户数组
             let accountNumbers = [];
 
             if (Array.isArray(accountRange)) {
-                // 如果是数组，直接使用
                 accountNumbers = accountRange;
             } else if (typeof accountRange === 'object' && 'start' in accountRange && 'end' in accountRange) {
-                // 如果是{start, end}对象，生成范围内所有数字
                 const { start, end } = accountRange;
                 if (typeof start !== 'number' || typeof end !== 'number' || start > end) {
                     throw new Error('账户范围无效: start必须小于等于end');
@@ -5014,12 +4987,7 @@ export class SolanaService {
                 accountCount: accountNumbers.length,
                 mintAddress,
                 percentage,
-                options: {
-                    slippage: txOptions.slippage,
-                    usePriorityFee: txOptions.usePriorityFee,
-                    jitoTipSol: txOptions.jitoTipSol,
-                    bundleSize: txOptions.bundleSize
-                }
+                options: txOptions
             });
 
             // 3. 获取所有钱包并检查
@@ -5062,13 +5030,11 @@ export class SolanaService {
 
             for (const walletInfo of wallets) {
                 try {
-                    // 获取代币余额
                     const tokenBalance = await this.getTokenBalance(
                         walletInfo.wallet.publicKey,
                         mintAddress
                     );
 
-                    // 如果没有余额，记录并跳过
                     if (tokenBalance === '0') {
                         insufficientTokenWallets.push({
                             accountNumber: walletInfo.accountNumber,
@@ -5078,7 +5044,6 @@ export class SolanaService {
                         continue;
                     }
 
-                    // 计算卖出数量
                     const tokenBalanceBigInt = BigInt(tokenBalance);
                     const sellAmount = (tokenBalanceBigInt * BigInt(Math.floor(percentage * 100))) / BigInt(10000);
 
@@ -5091,7 +5056,6 @@ export class SolanaService {
                         continue;
                     }
 
-                    // 添加到有效钱包列表
                     walletsWithBalance.push({
                         ...walletInfo,
                         tokenBalance,
@@ -5118,42 +5082,63 @@ export class SolanaService {
                 wallet: walletInfo.wallet,
                 mint: new PublicKey(mintAddress),
                 sellAmount: walletInfo.sellAmount,
-                percentage,
-                slippageBasisPoints: txOptions.slippage,
-                tipAmountSol: txOptions.usePriorityFee ? txOptions.jitoTipSol : 0,
-                usePriorityFee: txOptions.usePriorityFee,
-                options: {
-                    skipPreflight: txOptions.skipPreflight
-                }
+                percentage
             }));
-
-            logger.info('准备执行批量卖出:', {
-                totalWallets: wallets.length,
-                walletsWithBalance: walletsWithBalance.length,
-                insufficientTokens: insufficientTokenWallets.length,
-                skipped: skippedAccounts.length,
-                bundleSize: txOptions.bundleSize,
-                usePriorityFee: txOptions.usePriorityFee
-            });
 
             // 6. 执行批量卖出
             const batchSellOptions = {
-                bundleMaxSize: txOptions.bundleSize,
-                waitBetweenBundles: txOptions.waitBetweenMs,
+                bundleMaxSize: txOptions.bundleMaxSize,
+                waitBetweenBundles: txOptions.waitBetweenBundles,
                 retryAttempts: txOptions.retryAttempts,
                 skipPreflight: txOptions.skipPreflight,
-                usePriorityFee: txOptions.usePriorityFee, // 是否使用优先上链
-                normalSubmission: !txOptions.usePriorityFee // 是否使用普通上链
+                preflightCommitment: txOptions.preflightCommitment,
+                slippageBasisPoints: txOptions.slippageBasisPoints,
+                usePriorityFee: txOptions.usePriorityFee,
+                jitoTipSol: txOptions.jitoTipSol
             };
 
-            // 调用SDK的批量卖出方法
             const batchResults = await this.sdk.batchSellByPercentage(operations, batchSellOptions);
 
             // 7. 处理结果
+            if (!batchResults || !batchResults.results) {
+                logger.error('批量卖出失败: 返回结果无效', {
+                    mintAddress,
+                    sellerGroup,
+                    batchResults
+                });
+
+                return {
+                    success: false,
+                    summary: {
+                        total: wallets.length,
+                        attempted: walletsWithBalance.length,
+                        successful: 0,
+                        failed: walletsWithBalance.length,
+                        skipped: skippedAccounts.length + insufficientTokenWallets.length
+                    },
+                    error: '批量卖出操作返回了无效结果',
+                    transactions: {
+                        successful: [],
+                        failed: walletsWithBalance.map(w => ({
+                            accountNumber: w.accountNumber,
+                            publicKey: w.publicKey,
+                            error: '批量卖出操作返回了无效结果',
+                            percentage,
+                            tokenAmount: w.sellAmount
+                        }))
+                    },
+                    skippedWallets: [
+                        ...skippedAccounts,
+                        ...insufficientTokenWallets
+                    ],
+                    timestamp: new Date().toISOString()
+                };
+            }
+
             const successfulTransactions = [];
             const failedTransactions = [];
 
-            for (const result of batchResults) {
+            for (const result of batchResults.results) {
                 const walletInfo = walletsWithBalance.find(w => w.publicKey === result.wallet);
 
                 if (result.success) {
@@ -5163,21 +5148,41 @@ export class SolanaService {
                         signature: result.signature,
                         percentage,
                         tokenAmount: result.tokensAmount,
+                        solAmount: result.solAmount,
                         timestamp: result.timestamp || new Date().toISOString()
+                    });
+
+                    // 保存交易记录
+                    await this.saveTransaction({
+                        signature: result.signature,
+                        mint: mintAddress,
+                        owner: result.wallet,
+                        type: 'sell',
+                        solAmount: result.solAmount,
+                        tokenAmount: result.tokensAmount,
+                        tokenDecimals: result.tokenDecimals || 6,
+                        success: true,
+                        pricePerToken: result.pricePerToken,
+                        slippage: txOptions.slippageBasisPoints,
+                        groupType: sellerGroup,
+                        accountNumber: walletInfo?.accountNumber,
+                        percentage
                     });
 
                     // 更新账户余额
                     try {
                         if (walletInfo) {
-                            // 计算剩余代币数量
                             const remainingTokens = BigInt(walletInfo.tokenBalance) - BigInt(result.tokensAmount);
-
-                            await this.updateAccountBalances(
-                                walletInfo.wallet,
-                                new PublicKey(mintAddress),
-                                remainingTokens.toString(),
-                                null // 这里SOL金额为null，因为我们不知道确切的SOL收益
-                            );
+                            if (remainingTokens >= 0n) {
+                                await this.updateAccountBalances(
+                                    walletInfo.wallet,
+                                    new PublicKey(mintAddress),
+                                    remainingTokens.toString(),
+                                    null
+                                );
+                            } else {
+                                logger.warn(`余额计算异常: ${result.wallet}`);
+                            }
                         }
                     } catch (error) {
                         logger.warn(`更新账户余额失败: ${result.wallet}`, {
@@ -5203,7 +5208,12 @@ export class SolanaService {
                     attempted: walletsWithBalance.length,
                     successful: successfulTransactions.length,
                     failed: failedTransactions.length,
-                    skipped: skippedAccounts.length + insufficientTokenWallets.length
+                    skipped: skippedAccounts.length + insufficientTokenWallets.length,
+                    totalTokensSold: successfulTransactions.reduce((sum, tx) =>
+                        sum + BigInt(tx.tokenAmount), 0n).toString(),
+                    totalSolReceived: successfulTransactions.reduce((sum, tx) =>
+                        sum + (tx.solAmount ? parseFloat(tx.solAmount) : 0), 0).toFixed(9),
+                    averageSuccess: (successfulTransactions.length / walletsWithBalance.length * 100).toFixed(2) + '%'
                 },
                 transactions: {
                     successful: successfulTransactions,
@@ -5213,7 +5223,11 @@ export class SolanaService {
                     ...skippedAccounts,
                     ...insufficientTokenWallets
                 ],
-                timestamp: new Date().toISOString()
+                timing: {
+                    startTime: new Date(startTime).toISOString(),
+                    endTime: new Date().toISOString(),
+                    duration: `${(Date.now() - startTime) / 1000}s`
+                }
             };
 
             logger.info('批量卖出完成:', {
@@ -5222,16 +5236,22 @@ export class SolanaService {
                 successful: successfulTransactions.length,
                 failed: failedTransactions.length,
                 skipped: finalResult.summary.skipped,
-                usedPriorityFee: txOptions.usePriorityFee
+                totalTokensSold: finalResult.summary.totalTokensSold,
+                totalSolReceived: finalResult.summary.totalSolReceived,
+                duration: finalResult.timing.duration
             });
 
             return finalResult;
+
         } catch (error) {
             logger.error('批量卖出失败:', {
                 error: error.message,
                 stack: error.stack,
                 sellerGroup,
-                mintAddress
+                mintAddress,
+                accountRange,
+                percentage,
+                options
             });
             throw error;
         }

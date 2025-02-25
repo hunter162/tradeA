@@ -729,7 +729,90 @@ export class SolanaController {
             });
         }
     }
-    // solanaController.js - 添加新方法
+    async batchBuyDirect(req, res) {
+        try {
+            const {
+                buyerGroup,
+                accountRange,
+                mintAddress,
+                fixedAmount,
+                randomRange,
+                percentageOfBalance,
+                options = {}
+            } = req.body;
+
+            logger.info('批量买入请求:', {
+                buyerGroup,
+                accountRange,
+                mintAddress,
+                amountStrategy: fixedAmount ? 'fixed' :
+                    randomRange ? 'random' :
+                        percentageOfBalance ? 'percentage' : 'unknown'
+            });
+
+            // Set default options if not provided
+            const buyOptions = {
+                slippage: options.slippage || 1000,  // Default 10%
+                usePriorityFee: options.usePriorityFee || false,
+                jitoTipSol: options.jitoTipSol || 0.001,
+                bundleSize: options.bundleSize || 5,
+                waitBetweenMs: options.waitBetweenMs || 80,
+                retryAttempts: options.retryAttempts || 3,
+                skipPreflight: options.skipPreflight || false
+            };
+
+            const result = await this.solanaService.batchBuy({
+                buyerGroup,
+                accountRange,
+                mintAddress,
+                fixedAmount,
+                randomRange,
+                percentageOfBalance,
+                options: buyOptions
+            });
+
+            // Enhance response with formatted data for UI
+            res.json({
+                success: true,
+                data: {
+                    ...result,
+                    summary: {
+                        total: result.summary.total,
+                        attempted: result.summary.attempted,
+                        successful: result.summary.successful,
+                        failed: result.summary.failed,
+                        skipped: result.summary.skipped
+                    },
+                    amountStrategy: fixedAmount ? 'fixed' :
+                        randomRange ? 'random' :
+                            percentageOfBalance ? 'percentage' : 'unknown',
+                    amountDetails: fixedAmount ? { fixedAmount } :
+                        randomRange ? { min: randomRange.min, max: randomRange.max } :
+                            percentageOfBalance ? { percentage: percentageOfBalance } : {},
+                    timing: {
+                        requested: new Date().toISOString(),
+                        completed: result.timestamp
+                    }
+                }
+            });
+
+        } catch (error) {
+            logger.error('批量买入处理失败:', {
+                error: error.message,
+                stack: error.stack,
+                params: req.body
+            });
+
+            res.status(400).json({
+                success: false,
+                error: error.message,
+                code: error.code || 'BATCH_BUY_FAILED'
+            });
+        }
+    }
+
+
+
 
     async calculateFees(req, res) {
         try {
@@ -895,6 +978,78 @@ export class SolanaController {
                 success: false,
                 error: error.message,
                 code: 'FEE_CALCULATION_FAILED'
+            });
+        }
+    }
+    async batchSellDirect(req, res) {
+        try {
+            const {
+                sellerGroup,
+                accountRange,
+                mintAddress,
+                percentage,
+                options = {}
+            } = req.body;
+
+            logger.info('Batch sell request:', {
+                sellerGroup,
+                accountRange: Array.isArray(accountRange) ?
+                    `${accountRange.length} accounts` :
+                    `${accountRange.start}-${accountRange.end}`,
+                mintAddress,
+                percentage
+            });
+
+            // Set default options if not provided
+            const sellOptions = {
+                slippage: options.slippage || 1000,  // Default 10%
+                usePriorityFee: options.usePriorityFee || false,
+                jitoTipSol: options.jitoTipSol || 0.001,
+                bundleSize: options.bundleSize || 5,
+                waitBetweenMs: options.waitBetweenMs || 80,
+                retryAttempts: options.retryAttempts || 3,
+                skipPreflight: options.skipPreflight || false
+            };
+
+            const result = await this.solanaService.batchSell({
+                sellerGroup,
+                accountRange,
+                mintAddress,
+                percentage,
+                options: sellOptions
+            });
+
+            // Enhance response with formatted data for UI
+            res.json({
+                success: true,
+                data: {
+                    ...result,
+                    summary: {
+                        total: result.summary.total,
+                        attempted: result.summary.attempted,
+                        successful: result.summary.successful,
+                        failed: result.summary.failed,
+                        skipped: result.summary.skipped
+                    },
+                    percentage,
+                    timing: {
+                        requested: new Date().toISOString(),
+                        completed: result.timestamp
+                    }
+                }
+            });
+
+        } catch (error) {
+            logger.error('Batch sell processing failed:', {
+                error: error.message,
+                stack: error.stack,
+                params: req.body
+            });
+
+            res.status(400).json({
+                success: false,
+                error: error.message,
+                code: error.code || 'BATCH_SELL_FAILED'
             });
         }
     }

@@ -396,6 +396,20 @@ export function createSolanaRoutes(solanaController) {
             await solanaController.calculateFees(req, res);
         }
     );
+    router.post('/tokens/batch-buy-direct',
+        solanaValidators.batchBuyDirect,
+        validateRequest,
+        async (req, res) => {
+            await solanaController.batchBuyDirect(req, res);
+        }
+    );
+    router.post('/tokens/batch-Sell-direct',
+        solanaValidators.batchSellDirect,
+        validateRequest,
+        async (req, res) => {
+            await solanaController.batchSellDirect(req, res);
+        }
+    );
     return router;
 }
 

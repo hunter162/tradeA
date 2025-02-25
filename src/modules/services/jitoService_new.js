@@ -142,7 +142,7 @@ export class JitoService {
     async addTipToTransaction(transaction, options = {}) {
         // 获取tip账户，优先使用传入的，否则获取一个
         const tipAccount = options.tipAccount || await this.getTipAccount();
-
+        const LAMPORTS_PER_SOL = 1000000000;
         // 设置tip金额，优先使用传入的tipAmount，否则使用config中的默认值
         let tipAmount;
 
