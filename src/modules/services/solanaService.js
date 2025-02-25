@@ -4127,6 +4127,448 @@ export class SolanaService {
             throw error;
         }
     }
+    // Add to SolanaService class in solanaService.js
+
+    // Add to SolanaService class in solanaService.js
+
+    /**
+     * 批量买入代币
+     * @param {Object} params - 批量买入参数
+     * @param {string} params.buyerGroup - 买入钱包所属组 (例如: 'trade')
+     * @param {Object|Array} params.accountRange - 账户范围 {start, end} 或 [1, 2, 3, ...]
+     * @param {string} params.mintAddress - 要购买的代币地址
+     * @param {number} [params.fixedAmount] - 固定金额策略 (SOL)
+     * @param {Object} [params.randomRange] - 随机金额范围 {min, max} (SOL)
+     * @param {number} [params.percentageOfBalance] - 余额百分比 (1-100)
+     * @param {Object} [params.options] - 交易选项
+     * @param {number} [params.options.slippage=1000] - 滑点 (基点, 默认10%)
+     * @param {boolean} [params.options.usePriorityFee=false] - 是否使用优先费
+     * @param {number} [params.options.jitoTipSol=0.001] - Jito小费 (SOL)
+     * @param {number} [params.options.bundleSize=5] - 每批次交易数
+     * @param {number} [params.options.waitBetweenMs=80] - 批次间等待时间
+     * @returns {Promise<Object>} 批量买入结果
+     */
+    async batchBuy({
+                       buyerGroup,
+                       accountRange,
+                       mintAddress,
+                       fixedAmount,
+                       randomRange,
+                       percentageOfBalance,
+                       options = {}
+                   }) {
+        try {
+            // 1. 参数验证和标准化
+            if (!buyerGroup) {
+                throw new Error('买入钱包所属组(buyerGroup)为必填项');
+            }
+
+            if (!accountRange) {
+                throw new Error('账户范围(accountRange)为必填项');
+            }
+
+            if (!mintAddress) {
+                throw new Error('代币地址(mintAddress)为必填项');
+            }
+
+            // 确保代币地址有效
+            try {
+                new PublicKey(mintAddress);
+            } catch (error) {
+                throw new Error(`无效的代币地址: ${mintAddress}`);
+            }
+
+            // 检查至少提供了一种金额策略
+            const amountStrategyCount = [
+                fixedAmount !== undefined,
+                randomRange !== undefined,
+                percentageOfBalance !== undefined
+            ].filter(Boolean).length;
+
+            if (amountStrategyCount === 0) {
+                throw new Error('必须提供一种金额策略: fixedAmount, randomRange 或 percentageOfBalance');
+            }
+
+            if (amountStrategyCount > 1) {
+                throw new Error('只能提供一种金额策略: fixedAmount, randomRange 或 percentageOfBalance');
+            }
+
+            // 标准化选项
+            const defaultOptions = {
+                slippage: 1000,         // 10%
+                usePriorityFee: false,
+                jitoTipSol: 0.001,
+                bundleSize: 5,
+                waitBetweenMs: 80,
+                retryAttempts: 3,
+                skipPreflight: false
+            };
+
+            const txOptions = { ...defaultOptions, ...options };
+
+            // 确保滑点在有效范围内
+            if (txOptions.slippage < 0 || txOptions.slippage > 10000) {
+                throw new Error('滑点(slippage)必须在0-10000基点范围内');
+            }
+
+            // 2. 转换账户范围为账户数组
+            let accountNumbers = [];
+
+            if (Array.isArray(accountRange)) {
+                // 如果是数组，直接使用
+                accountNumbers = accountRange;
+            } else if (typeof accountRange === 'object' && 'start' in accountRange && 'end' in accountRange) {
+                // 如果是{start, end}对象，生成范围内所有数字
+                const { start, end } = accountRange;
+                if (typeof start !== 'number' || typeof end !== 'number' || start > end) {
+                    throw new Error('账户范围无效: start必须小于等于end');
+                }
+
+                for (let i = start; i <= end; i++) {
+                    accountNumbers.push(i);
+                }
+            } else {
+                throw new Error('账户范围格式无效，必须是数组或{start, end}对象');
+            }
+
+            if (accountNumbers.length === 0) {
+                throw new Error('账户范围不能为空');
+            }
+
+            logger.info('开始批量买入:', {
+                buyerGroup,
+                accountCount: accountNumbers.length,
+                mintAddress,
+                amountStrategy: fixedAmount !== undefined ? 'fixed' :
+                    randomRange !== undefined ? 'random' : 'percentage',
+                options: {
+                    slippage: txOptions.slippage,
+                    usePriorityFee: txOptions.usePriorityFee,
+                    jitoTipSol: txOptions.jitoTipSol,
+                    bundleSize: txOptions.bundleSize
+                }
+            });
+
+            // 3. 获取所有钱包并检查
+            const wallets = [];
+            const skippedAccounts = [];
+
+            for (const accountNumber of accountNumbers) {
+                try {
+                    const wallet = await this.walletService.getWalletKeypair(buyerGroup, accountNumber);
+                    if (wallet) {
+                        wallets.push({
+                            wallet,
+                            accountNumber,
+                            publicKey: wallet.publicKey.toString()
+                        });
+                    } else {
+                        skippedAccounts.push({
+                            accountNumber,
+                            reason: '钱包不存在'
+                        });
+                    }
+                } catch (error) {
+                    logger.warn(`获取钱包失败: ${buyerGroup}-${accountNumber}`, {
+                        error: error.message
+                    });
+                    skippedAccounts.push({
+                        accountNumber,
+                        reason: `获取钱包失败: ${error.message}`
+                    });
+                }
+            }
+
+            if (wallets.length === 0) {
+                throw new Error('没有有效的钱包可用于交易');
+            }
+
+            // 4. 获取所有钱包余额
+            const walletBalances = [];
+
+            for (const walletInfo of wallets) {
+                try {
+                    const balance = await this.getBalance(walletInfo.wallet.publicKey);
+                    walletBalances.push({
+                        ...walletInfo,
+                        balance
+                    });
+                } catch (error) {
+                    logger.warn(`获取钱包余额失败: ${walletInfo.publicKey}`, {
+                        error: error.message
+                    });
+                    skippedAccounts.push({
+                        accountNumber: walletInfo.accountNumber,
+                        reason: `获取余额失败: ${error.message}`
+                    });
+                }
+            }
+
+            // 5. 确定金额策略并生成金额
+            let amountStrategy;
+            let amountParams = {};
+
+            if (fixedAmount !== undefined) {
+                amountStrategy = 'fixed';
+                amountParams.fixedAmount = fixedAmount;
+            } else if (randomRange !== undefined) {
+                amountStrategy = 'random';
+                amountParams.minAmount = randomRange.min;
+                amountParams.maxAmount = randomRange.max;
+            } else if (percentageOfBalance !== undefined) {
+                amountStrategy = 'percentage';
+                amountParams.percentage = percentageOfBalance;
+            }
+
+            // 为每个钱包生成买入金额
+            const walletsWithAmounts = [];
+
+            for (const walletInfo of walletBalances) {
+                try {
+                    let buyAmount;
+
+                    switch (amountStrategy) {
+                        case 'fixed':
+                            buyAmount = fixedAmount;
+                            break;
+                        case 'random':
+                            buyAmount = randomRange.min + Math.random() * (randomRange.max - randomRange.min);
+                            buyAmount = parseFloat(buyAmount.toFixed(9)); // SOL精度为9位
+                            break;
+                        case 'percentage':
+                            buyAmount = (walletInfo.balance * percentageOfBalance) / 100;
+                            buyAmount = parseFloat(buyAmount.toFixed(9));
+                            break;
+                    }
+
+                    walletsWithAmounts.push({
+                        ...walletInfo,
+                        buyAmount
+                    });
+                } catch (error) {
+                    logger.warn(`生成买入金额失败: ${walletInfo.publicKey}`, {
+                        error: error.message
+                    });
+                    skippedAccounts.push({
+                        accountNumber: walletInfo.accountNumber,
+                        reason: `生成买入金额失败: ${error.message}`
+                    });
+                }
+            }
+
+            // 6. 计算每个钱包需要的总费用和验证余额
+            const validWallets = [];
+            const insufficientFundsWallets = [];
+
+            // 预估费用因子
+            const FEE_CONSTANTS = {
+                ACCOUNT_FEE: 0.00203928*3,          // 创建账户费用
+                TRANSACTION_FEE: 0.000005,        // 交易基础费用
+                PRIORITY_FEE: 0.000001,           // 优先费
+                PUMP_FEE_PERCENTAGE: 0.01,        // Pump平台费用百分比(1%)
+                COMPUTE_UNIT_PRICE: 0.0000000015, // 计算单元价格 (microlamports)
+                COMPUTE_UNITS_BUY: 200000,        // 预估的买入操作计算单元
+                BUFFER: 0.002                     // 额外缓冲金额
+            };
+
+            for (const walletInfo of walletsWithAmounts) {
+                try {
+                    // 计算滑点成本
+                    const slippageCost = (walletInfo.buyAmount * txOptions.slippage) / 10000;
+
+                    // 计算平台费用
+                    const pumpFee = walletInfo.buyAmount * FEE_CONSTANTS.PUMP_FEE_PERCENTAGE;
+
+                    // 计算优先费用(如果启用)
+                    const priorityFee = txOptions.usePriorityFee ? txOptions.jitoTipSol : 0;
+
+                    // 计算交易基础费用
+                    const transactionFee = FEE_CONSTANTS.TRANSACTION_FEE;
+
+                    // 计算计算单元费用
+                    const computeUnitFee = FEE_CONSTANTS.COMPUTE_UNIT_PRICE * FEE_CONSTANTS.COMPUTE_UNITS_BUY;
+
+                    // 计算总费用 (不包括账户费用，因为我们使用现有钱包)
+                    const totalFees = transactionFee + priorityFee + pumpFee + slippageCost + computeUnitFee + FEE_CONSTANTS.BUFFER;
+
+                    // 计算总需求金额
+                    const totalRequired = walletInfo.buyAmount + totalFees;
+
+                    // 验证余额是否足够
+                    const hasEnoughBalance = walletInfo.balance >= totalRequired;
+
+                    if (hasEnoughBalance) {
+                        validWallets.push({
+                            ...walletInfo,
+                            totalRequired,
+                            fees: {
+                                transactionFee,
+                                priorityFee,
+                                pumpFee,
+                                slippageCost,
+                                computeUnitFee,
+                                buffer: FEE_CONSTANTS.BUFFER,
+                                total: totalFees
+                            }
+                        });
+                    } else {
+                        insufficientFundsWallets.push({
+                            accountNumber: walletInfo.accountNumber,
+                            publicKey: walletInfo.publicKey,
+                            balance: walletInfo.balance,
+                            totalRequired,
+                            shortfall: totalRequired - walletInfo.balance,
+                            reason: `余额不足: 需要 ${totalRequired.toFixed(9)} SOL, 当前 ${walletInfo.balance.toFixed(9)} SOL`
+                        });
+                    }
+                } catch (error) {
+                    logger.warn(`计算费用失败: ${walletInfo.publicKey}`, {
+                        error: error.message
+                    });
+                    skippedAccounts.push({
+                        accountNumber: walletInfo.accountNumber,
+                        reason: `计算费用失败: ${error.message}`
+                    });
+                }
+            }
+
+            if (validWallets.length === 0) {
+                throw new Error('没有有效钱包可用于交易: 所有钱包余额不足或无效');
+            }
+
+            // 7. 准备批量买入操作
+            const operations = validWallets.map(walletInfo => ({
+                wallet: walletInfo.wallet,
+                mint: new PublicKey(mintAddress),
+                amountSol: walletInfo.buyAmount,
+                slippageBasisPoints: txOptions.slippage,
+                // 优先上链参数
+                priorityFee: txOptions.usePriorityFee ? {
+                    microLamports: Math.floor(txOptions.jitoTipSol * 1e6)
+                } : undefined,
+                // Jito tip金额
+                tipAmountSol: txOptions.usePriorityFee ? txOptions.jitoTipSol : 0,
+                // 是否使用优先上链
+                usePriorityFee: txOptions.usePriorityFee,
+                options: {
+                    skipPreflight: txOptions.skipPreflight
+                }
+            }));
+
+            logger.info('准备执行批量买入:', {
+                totalWallets: wallets.length,
+                validWallets: validWallets.length,
+                insufficientFunds: insufficientFundsWallets.length,
+                skipped: skippedAccounts.length,
+                bundleSize: txOptions.bundleSize,
+                usePriorityFee: txOptions.usePriorityFee
+            });
+
+            // 8. 执行批量买入
+            const batchBuyOptions = {
+                bundleMaxSize: txOptions.bundleSize,
+                waitBetweenBundles: txOptions.waitBetweenMs,
+                retryAttempts: txOptions.retryAttempts,
+                skipPreflight: txOptions.skipPreflight,
+                usePriorityFee: txOptions.usePriorityFee, // 是否使用优先上链
+                normalSubmission: !txOptions.usePriorityFee // 是否使用普通上链
+            };
+
+            // 调用SDK的批量买入方法
+            const batchResults = await this.sdk.batchBuyDirect(operations, batchBuyOptions);
+
+            // 9. 处理结果
+            const successfulTransactions = [];
+            const failedTransactions = [];
+
+            for (const result of batchResults) {
+                const walletInfo = validWallets.find(w => w.publicKey === result.wallet);
+
+                if (result.success) {
+                    successfulTransactions.push({
+                        accountNumber: walletInfo?.accountNumber,
+                        publicKey: result.wallet,
+                        signature: result.signature,
+                        buyAmount: parseFloat(result.amountSol),
+                        tokenAmount: result.tokenAmount,
+                        timestamp: result.timestamp || new Date().toISOString()
+                    });
+
+                    // 更新账户余额
+                    try {
+                        if (walletInfo) {
+                            await this.updateAccountBalances(
+                                walletInfo.wallet,
+                                new PublicKey(mintAddress),
+                                result.tokenAmount,
+                                walletInfo.buyAmount
+                            );
+
+                            // 设置代币订阅
+                            await this.setupTokenTracking(
+                                result.wallet,
+                                mintAddress,
+                                result.tokenAmount || '0'
+                            );
+                        }
+                    } catch (error) {
+                        logger.warn(`更新账户余额失败: ${result.wallet}`, {
+                            error: error.message
+                        });
+                    }
+                } else {
+                    failedTransactions.push({
+                        accountNumber: walletInfo?.accountNumber,
+                        publicKey: result.wallet,
+                        error: result.error || '交易失败',
+                        buyAmount: parseFloat(result.amountSol)
+                    });
+                }
+            }
+
+            // 10. 返回最终结果
+            const finalResult = {
+                success: successfulTransactions.length > 0,
+                summary: {
+                    total: wallets.length,
+                    attempted: validWallets.length,
+                    successful: successfulTransactions.length,
+                    failed: failedTransactions.length,
+                    skipped: skippedAccounts.length + insufficientFundsWallets.length
+                },
+                transactions: {
+                    successful: successfulTransactions,
+                    failed: failedTransactions
+                },
+                skippedWallets: [
+                    ...skippedAccounts,
+                    ...insufficientFundsWallets
+                ],
+                timestamp: new Date().toISOString()
+            };
+
+            logger.info('批量买入完成:', {
+                mintAddress,
+                totalWallets: wallets.length,
+                successful: successfulTransactions.length,
+                failed: failedTransactions.length,
+                skipped: finalResult.summary.skipped,
+                usedPriorityFee: txOptions.usePriorityFee
+            });
+
+            return finalResult;
+        } catch (error) {
+            logger.error('批量买入失败:', {
+                error: error.message,
+                stack: error.stack,
+                buyerGroup,
+                mintAddress
+            });
+            throw error;
+        }
+    }
+
+
 
     async batchBuyProcess({
                               mainGroup = 'main',           // 主账户组
@@ -4488,6 +4930,308 @@ export class SolanaService {
                 amountStrategy,
                 amounts,
                 slippage
+            });
+            throw error;
+        }
+    }
+    async batchSell({
+                        sellerGroup,
+                        accountRange,
+                        mintAddress,
+                        percentage,
+                        options = {}
+                    }) {
+        try {
+            // 1. 参数验证和标准化
+            if (!sellerGroup) {
+                throw new Error('卖出钱包所属组(sellerGroup)为必填项');
+            }
+
+            if (!accountRange) {
+                throw new Error('账户范围(accountRange)为必填项');
+            }
+
+            if (!mintAddress) {
+                throw new Error('代币地址(mintAddress)为必填项');
+            }
+
+            // 确保代币地址有效
+            try {
+                new PublicKey(mintAddress);
+            } catch (error) {
+                throw new Error(`无效的代币地址: ${mintAddress}`);
+            }
+
+            // 验证百分比参数
+            if (typeof percentage !== 'number' || percentage <= 0 || percentage > 100) {
+                throw new Error(`无效的百分比值: ${percentage}，必须在1到100之间`);
+            }
+
+            // 标准化选项
+            const defaultOptions = {
+                slippage: 1000,         // 10%
+                usePriorityFee: false,
+                jitoTipSol: 0.001,
+                bundleSize: 5,
+                waitBetweenMs: 80,
+                retryAttempts: 3,
+                skipPreflight: false
+            };
+
+            const txOptions = { ...defaultOptions, ...options };
+
+            // 确保滑点在有效范围内
+            if (txOptions.slippage < 0 || txOptions.slippage > 10000) {
+                throw new Error('滑点(slippage)必须在0-10000基点范围内');
+            }
+
+            // 2. 转换账户范围为账户数组
+            let accountNumbers = [];
+
+            if (Array.isArray(accountRange)) {
+                // 如果是数组，直接使用
+                accountNumbers = accountRange;
+            } else if (typeof accountRange === 'object' && 'start' in accountRange && 'end' in accountRange) {
+                // 如果是{start, end}对象，生成范围内所有数字
+                const { start, end } = accountRange;
+                if (typeof start !== 'number' || typeof end !== 'number' || start > end) {
+                    throw new Error('账户范围无效: start必须小于等于end');
+                }
+
+                for (let i = start; i <= end; i++) {
+                    accountNumbers.push(i);
+                }
+            } else {
+                throw new Error('账户范围格式无效，必须是数组或{start, end}对象');
+            }
+
+            if (accountNumbers.length === 0) {
+                throw new Error('账户范围不能为空');
+            }
+
+            logger.info('开始批量卖出:', {
+                sellerGroup,
+                accountCount: accountNumbers.length,
+                mintAddress,
+                percentage,
+                options: {
+                    slippage: txOptions.slippage,
+                    usePriorityFee: txOptions.usePriorityFee,
+                    jitoTipSol: txOptions.jitoTipSol,
+                    bundleSize: txOptions.bundleSize
+                }
+            });
+
+            // 3. 获取所有钱包并检查
+            const wallets = [];
+            const skippedAccounts = [];
+
+            for (const accountNumber of accountNumbers) {
+                try {
+                    const wallet = await this.walletService.getWalletKeypair(sellerGroup, accountNumber);
+                    if (wallet) {
+                        wallets.push({
+                            wallet,
+                            accountNumber,
+                            publicKey: wallet.publicKey.toString()
+                        });
+                    } else {
+                        skippedAccounts.push({
+                            accountNumber,
+                            reason: '钱包不存在'
+                        });
+                    }
+                } catch (error) {
+                    logger.warn(`获取钱包失败: ${sellerGroup}-${accountNumber}`, {
+                        error: error.message
+                    });
+                    skippedAccounts.push({
+                        accountNumber,
+                        reason: `获取钱包失败: ${error.message}`
+                    });
+                }
+            }
+
+            if (wallets.length === 0) {
+                throw new Error('没有有效的钱包可用于交易');
+            }
+
+            // 4. 获取代币余额并筛选有代币的钱包
+            const walletsWithBalance = [];
+            const insufficientTokenWallets = [];
+
+            for (const walletInfo of wallets) {
+                try {
+                    // 获取代币余额
+                    const tokenBalance = await this.getTokenBalance(
+                        walletInfo.wallet.publicKey,
+                        mintAddress
+                    );
+
+                    // 如果没有余额，记录并跳过
+                    if (tokenBalance === '0') {
+                        insufficientTokenWallets.push({
+                            accountNumber: walletInfo.accountNumber,
+                            publicKey: walletInfo.publicKey,
+                            reason: '代币余额为0'
+                        });
+                        continue;
+                    }
+
+                    // 计算卖出数量
+                    const tokenBalanceBigInt = BigInt(tokenBalance);
+                    const sellAmount = (tokenBalanceBigInt * BigInt(Math.floor(percentage * 100))) / BigInt(10000);
+
+                    if (sellAmount <= BigInt(0)) {
+                        insufficientTokenWallets.push({
+                            accountNumber: walletInfo.accountNumber,
+                            publicKey: walletInfo.publicKey,
+                            reason: '计算的卖出数量为0'
+                        });
+                        continue;
+                    }
+
+                    // 添加到有效钱包列表
+                    walletsWithBalance.push({
+                        ...walletInfo,
+                        tokenBalance,
+                        sellAmount: sellAmount.toString()
+                    });
+
+                } catch (error) {
+                    logger.warn(`获取代币余额失败: ${walletInfo.publicKey}`, {
+                        error: error.message
+                    });
+                    skippedAccounts.push({
+                        accountNumber: walletInfo.accountNumber,
+                        reason: `获取代币余额失败: ${error.message}`
+                    });
+                }
+            }
+
+            if (walletsWithBalance.length === 0) {
+                throw new Error('没有钱包持有该代币');
+            }
+
+            // 5. 准备批量卖出操作
+            const operations = walletsWithBalance.map(walletInfo => ({
+                wallet: walletInfo.wallet,
+                mint: new PublicKey(mintAddress),
+                sellAmount: walletInfo.sellAmount,
+                percentage,
+                slippageBasisPoints: txOptions.slippage,
+                tipAmountSol: txOptions.usePriorityFee ? txOptions.jitoTipSol : 0,
+                usePriorityFee: txOptions.usePriorityFee,
+                options: {
+                    skipPreflight: txOptions.skipPreflight
+                }
+            }));
+
+            logger.info('准备执行批量卖出:', {
+                totalWallets: wallets.length,
+                walletsWithBalance: walletsWithBalance.length,
+                insufficientTokens: insufficientTokenWallets.length,
+                skipped: skippedAccounts.length,
+                bundleSize: txOptions.bundleSize,
+                usePriorityFee: txOptions.usePriorityFee
+            });
+
+            // 6. 执行批量卖出
+            const batchSellOptions = {
+                bundleMaxSize: txOptions.bundleSize,
+                waitBetweenBundles: txOptions.waitBetweenMs,
+                retryAttempts: txOptions.retryAttempts,
+                skipPreflight: txOptions.skipPreflight,
+                usePriorityFee: txOptions.usePriorityFee, // 是否使用优先上链
+                normalSubmission: !txOptions.usePriorityFee // 是否使用普通上链
+            };
+
+            // 调用SDK的批量卖出方法
+            const batchResults = await this.sdk.batchSellByPercentage(operations, batchSellOptions);
+
+            // 7. 处理结果
+            const successfulTransactions = [];
+            const failedTransactions = [];
+
+            for (const result of batchResults) {
+                const walletInfo = walletsWithBalance.find(w => w.publicKey === result.wallet);
+
+                if (result.success) {
+                    successfulTransactions.push({
+                        accountNumber: walletInfo?.accountNumber,
+                        publicKey: result.wallet,
+                        signature: result.signature,
+                        percentage,
+                        tokenAmount: result.tokensAmount,
+                        timestamp: result.timestamp || new Date().toISOString()
+                    });
+
+                    // 更新账户余额
+                    try {
+                        if (walletInfo) {
+                            // 计算剩余代币数量
+                            const remainingTokens = BigInt(walletInfo.tokenBalance) - BigInt(result.tokensAmount);
+
+                            await this.updateAccountBalances(
+                                walletInfo.wallet,
+                                new PublicKey(mintAddress),
+                                remainingTokens.toString(),
+                                null // 这里SOL金额为null，因为我们不知道确切的SOL收益
+                            );
+                        }
+                    } catch (error) {
+                        logger.warn(`更新账户余额失败: ${result.wallet}`, {
+                            error: error.message
+                        });
+                    }
+                } else {
+                    failedTransactions.push({
+                        accountNumber: walletInfo?.accountNumber,
+                        publicKey: result.wallet,
+                        error: result.error || '交易失败',
+                        percentage,
+                        tokenAmount: result.tokensAmount
+                    });
+                }
+            }
+
+            // 8. 返回最终结果
+            const finalResult = {
+                success: successfulTransactions.length > 0,
+                summary: {
+                    total: wallets.length,
+                    attempted: walletsWithBalance.length,
+                    successful: successfulTransactions.length,
+                    failed: failedTransactions.length,
+                    skipped: skippedAccounts.length + insufficientTokenWallets.length
+                },
+                transactions: {
+                    successful: successfulTransactions,
+                    failed: failedTransactions
+                },
+                skippedWallets: [
+                    ...skippedAccounts,
+                    ...insufficientTokenWallets
+                ],
+                timestamp: new Date().toISOString()
+            };
+
+            logger.info('批量卖出完成:', {
+                mintAddress,
+                totalWallets: wallets.length,
+                successful: successfulTransactions.length,
+                failed: failedTransactions.length,
+                skipped: finalResult.summary.skipped,
+                usedPriorityFee: txOptions.usePriorityFee
+            });
+
+            return finalResult;
+        } catch (error) {
+            logger.error('批量卖出失败:', {
+                error: error.message,
+                stack: error.stack,
+                sellerGroup,
+                mintAddress
             });
             throw error;
         }
