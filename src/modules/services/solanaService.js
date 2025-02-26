@@ -3824,87 +3824,178 @@ export class SolanaService {
         }
     }
 
-    async batchBuyAndSellByNumber({
-                                      groupType,
-                                      accountNumbers,
-                                      tokenAddress,
-                                      amountSol,
-                                      tipAmountSol = 0,
-                                      options = {}
-                                  }) {
+    async batchBuyAndSell({
+                              groupType,
+                              accountNumbers,
+                              tokenAddress,
+                              amountSol,
+                              sellPercentage = 100,
+                              slippage = 1000,
+                              tipAmountSol = 0,
+                              loopCount = 1,
+                              firstLoopDelay = 0,
+                              options = {}
+                          }) {
         try {
-            // 验证账户数量
-            if (![4, 50, 100, 500, 1000].includes(accountNumbers)) {
-                throw new Error('Invalid account numbers. Must be 4, 50, 100, 500, or 1000');
-            }
+            const allResults = [];
+            const tokenMint = new PublicKey(tokenAddress);
 
-            logger.info('开始批量买入并卖出:', {
-                groupType,
-                accountNumbers,
-                tokenAddress,
-                amountSol,
-                tipAmountSol
-            });
+            for(let loop = 0; loop < loopCount; loop++) {
+                console.log(`Starting execution loop ${loop + 1}/${loopCount}`);
 
-            const operations = [];
-            // 准备操作数组
-            for (let i = 1; i <= accountNumbers; i++) {
-                try {
-                    const wallet = await this.walletService.getWalletKeypair(groupType, i);
-                    if (!wallet) {
-                        throw new Error(`Wallet not found: ${groupType}-${i}`);
+                const operations = [];
+                const skippedAccounts = [];
+
+                // 处理每个账户
+                for (const accountNumber of accountNumbers) {
+                    try {
+                        const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
+                        const balance = await this.connection.getBalance(wallet.publicKey);
+
+                        // 计算所需费用和检查余额
+                        const requiredFees = await this.calculateFees({
+                            remainingLoops: loopCount - loop,
+                            tipAmountSol,
+                            amountSol
+                        });
+
+                        const totalRequired = amountSol + requiredFees;
+
+                        if (balance < totalRequired) {
+                            skippedAccounts.push({
+                                accountNumber,
+                                reason: 'Insufficient balance',
+                                balance,
+                                required: totalRequired
+                            });
+                            continue;
+                        }
+
+                        operations.push({
+                            wallet,
+                            mint: tokenMint,
+                            amountSol,
+                            sellPercentage,
+                            accountNumber,
+                            tipAmountSol,
+                            options: {
+                                slippageBasisPoints: slippage,
+                                ...options
+                            }
+                        });
+
+                    } catch (error) {
+                        console.error(`Failed to process account: ${groupType}-${accountNumber}`, error);
+                        skippedAccounts.push({
+                            accountNumber,
+                            reason: error.message
+                        });
                     }
+                }
 
-                    operations.push({
-                        wallet,
-                        mint: new PublicKey(tokenAddress),
-                        amountSol,
-                        tipAmountSol,
-                        options
-                    });
-                } catch (error) {
-                    logger.error(`准备账户 ${i} 失败:`, error);
+                if (operations.length === 0) {
+                    console.warn(`No valid operations for loop ${loop + 1}, skipping...`);
+                    continue;
+                }
+
+                // 执行批量操作
+                const results = await this.sdk.batchBuyAndSell(operations);
+
+                // 处理结果
+                const loopResult = {
+                    loopNumber: loop + 1,
+                    timestamp: new Date().toISOString(),
+                    successful: [],
+                    failed: [],
+                    skipped: skippedAccounts
+                };
+
+                // 处理每个交易结果
+                for (const result of results.results) {
+                    const operation = operations.find(
+                        op => op.wallet.publicKey.toString() === result.wallet
+                    );
+
+                    if (result.success) {
+                        loopResult.successful.push({
+                            accountNumber: operation.accountNumber,
+                            wallet: result.wallet,
+                            signature: result.signature,
+                            buyAmount: result.buyAmount,
+                            soldAmount: result.soldAmount,
+                            solReceived: result.solReceived
+                        });
+                    } else {
+                        loopResult.failed.push({
+                            accountNumber: operation.accountNumber,
+                            wallet: result.wallet,
+                            error: result.error
+                        });
+                    }
+                }
+
+                allResults.push(loopResult);
+
+                // 第一轮后的延迟
+                if (loop === 0 && firstLoopDelay > 0 && loop < loopCount - 1) {
+                    await new Promise(resolve => setTimeout(resolve, firstLoopDelay));
                 }
             }
 
-            // 调用 SDK 的批量买卖方法
-            const results = await this.sdk.batchBuyAndSell(operations);
-
-            // 处理结果
-            const successful = results.filter(r => r.success);
-            const failed = results.filter(r => !r.success);
-
-            // 更新账户余额
-            await Promise.all(
-                successful.map(result =>
-                    this.updateAccountBalances(
-                        {publicKey: new PublicKey(result.wallet)},
-                        new PublicKey(tokenAddress),
-                        null,  // token 余额会通过 WebSocket 更新
-                        null   // SOL 余额会通过 WebSocket 更新
-                    )
-                )
-            );
-
+            // 返回汇总结果
             return {
-                success: true,
-                totalAccounts: accountNumbers,
-                successful: successful.length,
-                failed: failed.length,
-                successfulTransactions: successful,
-                failedTransactions: failed
+                success: allResults.some(r => r.successful.length > 0),
+                summary: this.summarizeResults(allResults),
+                details: allResults
             };
 
         } catch (error) {
-            logger.error('批量买入并卖出失败:', {
-                error: error.message,
-                groupType,
-                accountNumbers,
-                stack: error.stack
-            });
+            console.error('Batch operation failed:', error);
             throw error;
         }
     }
+
+    async calculateFees({remainingLoops, tipAmountSol, amountSol}) {
+        const BASE_FEES = {
+            TX_FEE: 0.000005,
+            PRIORITY_FEE: 0.000001,
+            PUMP_FEE: 0.01,
+            SAFETY_MULTIPLIER: 1.2
+        };
+
+        const baseFee = BASE_FEES.TX_FEE + BASE_FEES.PRIORITY_FEE;
+        const pumpFee = amountSol * BASE_FEES.PUMP_FEE;
+        const totalFeesPerLoop = (baseFee + pumpFee + tipAmountSol) * 2; // 买卖各一次
+
+        return totalFeesPerLoop * remainingLoops * BASE_FEES.SAFETY_MULTIPLIER;
+    }
+
+    summarizeResults(results) {
+        const summary = {
+            totalLoops: results.length,
+            successful: 0,
+            failed: 0,
+            skipped: 0,
+            totalBuyAmount: 0,
+            totalSoldAmount: 0,
+            totalSolReceived: 0
+        };
+
+        results.forEach(loop => {
+            summary.successful += loop.successful.length;
+            summary.failed += loop.failed.length;
+            summary.skipped += loop.skipped.length;
+
+            loop.successful.forEach(tx => {
+                summary.totalBuyAmount += tx.buyAmount;
+                summary.totalSoldAmount += tx.soldAmount;
+                summary.totalSolReceived += tx.solReceived;
+            });
+        });
+
+        return summary;
+    }
+
 
     async generateFixedAmount(amount) {
         try {
