@@ -302,9 +302,41 @@ export const solanaValidators = {
             .matches(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/)
             .withMessage('Invalid Solana token address'),
 
-        body('amountSol')
-            .isFloat({ min: 0.000001 })
-            .withMessage('Amount must be greater than 0.000001 SOL'),
+        body('amountStrategy')
+            .optional()
+            .isString()
+            .isIn(['fixed', 'random', 'percentage', 'all'])
+            .withMessage('Amount strategy must be one of: fixed, random, percentage, all'),
+
+        // 根据策略验证对应参数
+        body()
+            .custom((body) => {
+                const strategy = body.amountStrategy || 'fixed';
+
+                switch (strategy) {
+                    case 'fixed':
+                        if (typeof body.amountSol !== 'number' || body.amountSol <= 0) {
+                            throw new Error('Fixed strategy requires a valid amountSol value');
+                        }
+                        break;
+
+                    case 'random':
+                        if (!body.amountConfig || !body.amountConfig.minAmount || !body.amountConfig.maxAmount ||
+                            body.amountConfig.minAmount >= body.amountConfig.maxAmount) {
+                            throw new Error('Random strategy requires valid minAmount and maxAmount');
+                        }
+                        break;
+
+                    case 'percentage':
+                        if (!body.amountConfig || typeof body.amountConfig.percentage !== 'number' ||
+                            body.amountConfig.percentage <= 0 || body.amountConfig.percentage > 100) {
+                            throw new Error('Percentage strategy requires a valid percentage value (0-100)');
+                        }
+                        break;
+                }
+
+                return true;
+            }),
 
         body('sellPercentage')
             .optional()

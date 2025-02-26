@@ -1053,6 +1053,7 @@ export class SolanaController {
             });
         }
     }
+    // 批量买入卖出代币
     async batchBuyAndSell(req, res) {
         try {
             const {
@@ -1060,30 +1061,41 @@ export class SolanaController {
                 accountNumbers,
                 tokenAddress,
                 amountSol,
-                sellPercentage = 100,
-                slippage = 1000,
-                tipAmountSol = 0,
-                loopCount = 1,
-                firstLoopDelay = 0,
-                options = {}
+                amountStrategy = "fixed", // 默认使用固定金额策略
+                amountConfig = {},        // 策略配置
+                sellPercentage = 100,     // 默认卖出全部(100%)
+                slippage = 1000,          // 默认滑点10%
+                tipAmountSol = 0,         // 默认无Jito小费
+                loopCount = 1,            // 默认执行一轮
+                firstLoopDelay = 0,       // 首轮后延迟
+                options = {}              // 其他选项
             } = req.body;
 
+            // 记录请求参数
             logger.info('批量买卖请求:', {
                 groupType,
                 accountNumbers: Array.isArray(accountNumbers)
                     ? `Array[${accountNumbers.length}]`
                     : `Range[${accountNumbers.start}-${accountNumbers.end}]`,
                 tokenAddress,
-                amountSol,
+                amountStrategy,
+                amountSol: amountStrategy === 'fixed' ? amountSol : undefined,
+                amountConfig: amountStrategy !== 'fixed' ? amountConfig : undefined,
                 sellPercentage,
                 loopCount
             });
 
+            // 验证买入策略参数
+            this.validateBuyStrategyParams(amountStrategy, amountSol, amountConfig);
+
+            // 执行批量买卖操作
             const result = await this.solanaService.batchBuyAndSell({
                 groupType,
                 accountNumbers,
                 tokenAddress,
                 amountSol,
+                amountStrategy,
+                amountConfig,
                 sellPercentage,
                 slippage,
                 tipAmountSol,
@@ -1092,6 +1104,7 @@ export class SolanaController {
                 options
             });
 
+            // 构建响应数据
             const response = {
                 success: true,
                 data: {
@@ -1102,31 +1115,42 @@ export class SolanaController {
                         skipped: result.summary.skipped,
                         totalBuyAmount: result.summary.totalBuyAmount,
                         totalSoldAmount: result.summary.totalSoldAmount,
-                        totalSolReceived: result.summary.totalSolReceived
+                        totalSolReceived: result.summary.totalSolReceived,
+                        netProfit: parseFloat((result.summary.totalSolReceived - result.summary.totalBuyAmount).toFixed(6)),
+                        profitPercentage: result.summary.totalBuyAmount > 0
+                            ? parseFloat(((result.summary.totalSolReceived / result.summary.totalBuyAmount - 1) * 100).toFixed(2))
+                            : 0
                     },
                     timing: {
                         startTime: result.timing.startTime,
                         endTime: result.timing.endTime,
                         duration: result.timing.duration
                     },
-                    loopDetails: result.details.map(loop => ({
-                        loopNumber: loop.loopNumber,
-                        timestamp: loop.timestamp,
-                        successful: {
-                            count: loop.successful.length,
-                            transactions: loop.successful
-                        },
-                        failed: {
-                            count: loop.failed.length,
-                            transactions: loop.failed
-                        },
-                        skipped: {
-                            count: loop.skipped.length,
-                            accounts: loop.skipped
-                        }
-                    }))
+                    configuration: {
+                        amountStrategy,
+                        sellPercentage,
+                        slippage: `${(slippage / 100).toFixed(2)}%`, // 转换为百分比显示
+                        loopCount,
+                        firstLoopDelay: firstLoopDelay > 0 ? `${firstLoopDelay}ms` : 'None'
+                    }
                 }
             };
+
+            // 是否包含详细的轮次数据
+            if (options.includeLoopDetails !== false) {
+                response.data.loopDetails = result.details.map(loop => ({
+                    loopNumber: loop.loopNumber,
+                    timestamp: loop.timestamp,
+                    successful: {
+                        count: loop.successful.length,
+                        transactions: options.includeTransactions ? loop.successful : undefined
+                    },
+                    failed: {
+                        count: loop.failed.length,
+                        transactions: options.includeTransactions ? loop.failed : undefined
+                    }
+                }));
+            }
 
             res.json(response);
 
@@ -1142,6 +1166,38 @@ export class SolanaController {
                 error: error.message,
                 code: error.code || 'BATCH_BUY_SELL_FAILED'
             });
+        }
+    }
+
+// 添加验证买入策略参数的辅助方法
+    validateBuyStrategyParams(strategy, amountSol, amountConfig) {
+        switch (strategy) {
+            case 'fixed':
+                if (typeof amountSol !== 'number' || amountSol <= 0) {
+                    throw new Error('Fixed strategy requires a valid amountSol value');
+                }
+                break;
+
+            case 'random':
+                if (!amountConfig.minAmount || !amountConfig.maxAmount ||
+                    amountConfig.minAmount >= amountConfig.maxAmount) {
+                    throw new Error('Random strategy requires valid minAmount and maxAmount (min must be less than max)');
+                }
+                break;
+
+            case 'percentage':
+                if (!amountConfig.percentage || amountConfig.percentage <= 0 ||
+                    amountConfig.percentage > 100) {
+                    throw new Error('Percentage strategy requires a valid percentage value (0-100)');
+                }
+                break;
+
+            case 'all':
+                // 'all'策略不需要额外参数
+                break;
+
+            default:
+                throw new Error(`Invalid amount strategy: ${strategy}. Must be one of: fixed, random, percentage, all`);
         }
     }
 } 

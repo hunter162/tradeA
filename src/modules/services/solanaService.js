@@ -3938,7 +3938,9 @@ export class SolanaService {
                               groupType,                // 钱包组类型
                               accountNumbers,          // 账户号码数组或范围对象
                               tokenAddress,           // 代币地址
-                              amountSol,             // 买入金额
+                              amountSol,             // 买入金额 (当买入策略为"fixed"时使用)
+                              amountStrategy = "fixed", // 买入策略: "fixed", "random", "percentage", "all"
+                              amountConfig = {},      // 买入策略的配置
                               sellPercentage = 100,  // 卖出百分比
                               slippage = 1000,       // 滑点
                               tipAmountSol = 0,      // Jito小费
@@ -3963,69 +3965,202 @@ export class SolanaService {
 
             const tokenMint = new PublicKey(tokenAddress);
 
+            // 验证买入策略
+            if (!['fixed', 'random', 'percentage', 'all'].includes(amountStrategy)) {
+                throw new Error('Invalid amount strategy. Must be one of: fixed, random, percentage, all');
+            }
+
+            // 验证买入策略配置
+            if (amountStrategy === 'fixed' && (amountSol === undefined || amountSol <= 0)) {
+                throw new Error('Fixed strategy requires a valid amountSol');
+            }
+
+            if (amountStrategy === 'random') {
+                if (!amountConfig.minAmount || !amountConfig.maxAmount || amountConfig.minAmount >= amountConfig.maxAmount) {
+                    throw new Error('Random strategy requires valid minAmount and maxAmount (min must be less than max)');
+                }
+            }
+
+            if (amountStrategy === 'percentage') {
+                if (!amountConfig.percentage || amountConfig.percentage <= 0 || amountConfig.percentage > 100) {
+                    throw new Error('Percentage strategy requires a valid percentage value (0-100)');
+                }
+            }
+
+            // 预处理所有钱包和余额信息
+            const walletsWithBalances = [];
+            const skippedInitialAccounts = [];
+
+            logger.info(`开始获取和验证 ${processedAccountNumbers.length} 个钱包...`);
+
+            // 1. 获取所有钱包和余额
+            for (const accountNumber of processedAccountNumbers) {
+                try {
+                    // 获取钱包
+                    const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
+                    if (!wallet) {
+                        skippedInitialAccounts.push({
+                            accountNumber,
+                            reason: `Wallet not found: ${groupType}-${accountNumber}`
+                        });
+                        continue;
+                    }
+
+                    // 获取SOL余额
+                    const solBalance = await this.getBalance(wallet.publicKey);
+
+                    // 获取代币余额(如果已持有)
+                    let tokenBalance = '0';
+                    try {
+                        tokenBalance = await this.getTokenBalance(wallet.publicKey, tokenAddress);
+                    } catch (error) {
+                        // 代币账户可能不存在，忽略错误
+                        logger.debug(`代币账户可能不存在: ${wallet.publicKey.toString()}`);
+                    }
+
+                    walletsWithBalances.push({
+                        accountNumber,
+                        wallet,
+                        publicKey: wallet.publicKey.toString(),
+                        solBalance,
+                        tokenBalance
+                    });
+                } catch (error) {
+                    logger.error(`获取钱包或余额失败: ${groupType}-${accountNumber}`, error);
+                    skippedInitialAccounts.push({
+                        accountNumber,
+                        reason: error.message
+                    });
+                }
+            }
+
+            if (walletsWithBalances.length === 0) {
+                throw new Error('没有可用的钱包来执行操作');
+            }
+
+            logger.info(`已获取 ${walletsWithBalances.length} 个有效钱包，跳过 ${skippedInitialAccounts.length} 个无效钱包`);
+
+            // 2. 为每个钱包计算买入金额和费用
+            const walletsWithAmounts = [];
+            const skippedFeeAccounts = [];
+
+            for (const walletInfo of walletsWithBalances) {
+                try {
+                    // 根据策略计算买入金额
+                    let buyAmount;
+
+                    switch (amountStrategy) {
+                        case 'fixed':
+                            buyAmount = amountSol;
+                            break;
+
+                        case 'random':
+                            const min = amountConfig.minAmount;
+                            const max = amountConfig.maxAmount;
+                            buyAmount = min + Math.random() * (max - min);
+                            buyAmount = parseFloat(buyAmount.toFixed(9)); // 保留9位小数
+                            break;
+
+                        case 'percentage':
+                            const percentage = amountConfig.percentage;
+                            buyAmount = (walletInfo.solBalance * percentage) / 100;
+                            buyAmount = parseFloat(buyAmount.toFixed(9)); // 保留9位小数
+                            break;
+
+                        case 'all':
+                            // 保留一小部分SOL用于交易费用
+                            buyAmount = Math.max(0, walletInfo.solBalance - 0.01);
+                            buyAmount = parseFloat(buyAmount.toFixed(9)); // 保留9位小数
+                            break;
+                    }
+
+                    // 如果计算出的买入金额太小或无效，跳过此钱包
+                    if (buyAmount <= 0.000001) { // 最小买入金额
+                        skippedFeeAccounts.push({
+                            accountNumber: walletInfo.accountNumber,
+                            reason: `计算的买入金额太小: ${buyAmount} SOL`,
+                            solBalance: walletInfo.solBalance
+                        });
+                        continue;
+                    }
+
+                    // 计算费用
+                    const fees = await this.calculateDetailedFees({
+                        buyAmount,
+                        sellPercentage,
+                        tipAmountSol,
+                        hasTokenAccount: walletInfo.tokenBalance !== '0',
+                        slippage,
+                        priorityFee: options.usePriorityFee || false
+                    });
+
+                    // 计算所需总金额
+                    const totalRequired = buyAmount + fees.totalFees;
+
+                    // 验证余额是否足够
+                    if (walletInfo.solBalance < totalRequired) {
+                        skippedFeeAccounts.push({
+                            accountNumber: walletInfo.accountNumber,
+                            publicKey: walletInfo.publicKey,
+                            reason: 'Insufficient balance for fees',
+                            solBalance: walletInfo.solBalance,
+                            required: totalRequired,
+                            buyAmount,
+                            fees: fees.totalFees,
+                            shortfall: totalRequired - walletInfo.solBalance
+                        });
+                        continue;
+                    }
+
+                    walletsWithAmounts.push({
+                        ...walletInfo,
+                        buyAmount,
+                        fees,
+                        totalRequired
+                    });
+                } catch (error) {
+                    logger.error(`为钱包计算费用失败: ${walletInfo.publicKey}`, error);
+                    skippedFeeAccounts.push({
+                        accountNumber: walletInfo.accountNumber,
+                        reason: `费用计算错误: ${error.message}`
+                    });
+                }
+            }
+
+            if (walletsWithAmounts.length === 0) {
+                throw new Error('没有钱包有足够的余额用于交易');
+            }
+
+            logger.info(`有 ${walletsWithAmounts.length} 个钱包有足够的余额，跳过 ${skippedFeeAccounts.length} 个余额不足的钱包`);
+
             const allResults = [];
 
+            // 3. 对每轮执行批量操作
             for(let loop = 0; loop < loopCount; loop++) {
                 logger.info(`开始执行第 ${loop + 1}/${loopCount} 轮操作`, {
                     groupType,
-                    accountCount: processedAccountNumbers.length,
-                    tokenAddress: tokenMint.toString()
+                    accountCount: walletsWithAmounts.length,
+                    tokenAddress: tokenMint.toString(),
+                    amountStrategy,
+                    amountConfigSummary: JSON.stringify(amountConfig)
                 });
 
-                const operations = [];
-                const skippedAccounts = [];
-
-                // 处理每个账户
-                for (const accountNumber of processedAccountNumbers) {
-                    try {
-                        const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
-                        const balance = await this.connection.getBalance(wallet.publicKey);
-
-                        // 计算所需费用和检查余额
-                        const requiredFees = await this.calculateFees({
-                            remainingLoops: loopCount - loop,
-                            tipAmountSol,
-                            amountSol
-                        });
-
-                        const totalRequired = amountSol + requiredFees;
-
-                        if (balance < totalRequired) {
-                            skippedAccounts.push({
-                                accountNumber,
-                                reason: 'Insufficient balance',
-                                balance: balance / LAMPORTS_PER_SOL,
-                                required: totalRequired
-                            });
-                            continue;
-                        }
-
-                        operations.push({
-                            wallet,
-                            mint: tokenMint,
-                            amountSol,
-                            sellPercentage,
-                            accountNumber,
-                            tipAmountSol,
-                            options: {
-                                slippageBasisPoints: slippage,
-                                ...options
-                            }
-                        });
-
-                    } catch (error) {
-                        logger.error(`处理账户失败: ${groupType}-${accountNumber}`, error);
-                        skippedAccounts.push({
-                            accountNumber,
-                            reason: error.message
-                        });
-                    }
-                }
-
-                if (operations.length === 0) {
-                    logger.warn(`第 ${loop + 1} 轮没有有效操作，跳过`);
-                    continue;
-                }
+                // 准备本轮操作
+                const operations = walletsWithAmounts.map(info => ({
+                    wallet: info.wallet,
+                    mint: tokenMint,
+                    amountSol: info.buyAmount,
+                    sellPercentage,
+                    accountNumber: info.accountNumber,
+                    tipAmountSol,
+                    options: {
+                        slippageBasisPoints: slippage,
+                        ...options
+                    },
+                    // 添加费用信息以便跟踪
+                    calculatedFees: info.fees,
+                    totalRequired: info.totalRequired
+                }));
 
                 // 执行批量操作
                 const results = await this.sdk.batchBuyAndSell(operations);
@@ -4036,7 +4171,7 @@ export class SolanaService {
                     timestamp: new Date().toISOString(),
                     successful: [],
                     failed: [],
-                    skipped: skippedAccounts
+                    skipped: [...skippedInitialAccounts, ...skippedFeeAccounts]
                 };
 
                 // 处理每个交易结果
@@ -4053,7 +4188,11 @@ export class SolanaService {
                             buyAmount: result.buyAmount,
                             soldAmount: result.soldAmount,
                             solReceived: result.solReceived,
-                            timestamp: new Date().toISOString()
+                            timestamp: new Date().toISOString(),
+                            amountStrategy,
+                            buyAmountSol: operation.amountSol,
+                            fees: operation.calculatedFees.totalFees,
+                            estimatedReturn: operation.calculatedFees.estimatedNetReturn
                         });
 
                         // 更新账户余额缓存
@@ -4068,7 +4207,9 @@ export class SolanaService {
                         loopResult.failed.push({
                             accountNumber: operation.accountNumber,
                             wallet: result.wallet,
-                            error: result.error || '交易失败'
+                            error: result.error || '交易失败',
+                            amountStrategy,
+                            buyAmountSol: operation.amountSol
                         });
                     }
                 }
@@ -4082,12 +4223,22 @@ export class SolanaService {
                 }
             }
 
-            // 汇总结果
+            // 4. 汇总结果
             const summary = this.summarizeResults(allResults);
 
+            // 5. 返回完整结果
             return {
                 success: allResults.some(r => r.successful.length > 0),
-                summary,
+                summary: {
+                    ...summary,
+                    amountStrategy,
+                    amountConfigSummary: JSON.stringify(amountConfig),
+                    accountsProcessed: walletsWithAmounts.length,
+                    accountsSkipped: skippedInitialAccounts.length + skippedFeeAccounts.length,
+                    totalFees: walletsWithAmounts.reduce((sum, info) => sum + info.fees.totalFees, 0).toFixed(9),
+                    estimatedTotalReturn: walletsWithAmounts.reduce((sum, info) => sum + info.fees.estimatedNetReturn, 0).toFixed(9),
+                    sellPercentage
+                },
                 details: allResults,
                 timing: {
                     startTime: new Date(startTime).toISOString(),
@@ -4102,12 +4253,146 @@ export class SolanaService {
                 stack: error.stack,
                 groupType,
                 tokenAddress,
+                amountStrategy,
                 accountNumbers: Array.isArray(accountNumbers)
                     ? accountNumbers.length
                     : `${accountNumbers.start}-${accountNumbers.end}`
             });
             throw error;
         }
+    }
+
+    /**
+     * 计算详细的费用明细，包括买入和卖出两方面的费用
+     * @param {Object} params - 计算参数
+     * @param {number} params.buyAmount - 买入金额(SOL)
+     * @param {number} params.sellPercentage - 卖出百分比(0-100)
+     * @param {number} params.tipAmountSol - Jito小费(SOL)
+     * @param {boolean} params.hasTokenAccount - 是否已有代币账户
+     * @param {number} params.slippage - 滑点(基点)
+     * @param {boolean} params.priorityFee - 是否使用优先费
+     * @returns {Object} 详细的费用明细
+     */
+    async calculateDetailedFees({
+                                    buyAmount,
+                                    sellPercentage = 100,
+                                    tipAmountSol = 0,
+                                    hasTokenAccount = false,
+                                    slippage = 1000,
+                                    priorityFee = false
+                                }) {
+        // 定义费用常量
+        const FEE_CONSTANTS = {
+            BASE_TX_FEE: 0.000005,         // 基础交易费用
+            PRIORITY_FEE: 0.000001,        // 优先费用
+            COMPUTE_UNITS_FEE: 0.0004,     // 计算单元费用
+            RENT_EXEMPTION: 0.00203928,    // 账户租金豁免
+            TOKEN_ACCOUNT_RENT: 0.00204,   // 代币账户租金
+            PUMP_BUY_FEE_PERCENTAGE: 0.01, // Pump买入平台费比例(1%)
+            PUMP_SELL_FEE_PERCENTAGE: 0.01, // Pump卖出平台费比例(1%)
+            SAFETY_BUFFER: 0.001           // 安全缓冲
+        };
+
+        // 1. 基础交易费用(买入和卖出两次交易)
+        const baseTxFee = FEE_CONSTANTS.BASE_TX_FEE * 2;
+
+        // 2. 计算单元费用
+        const computeUnitsFee = FEE_CONSTANTS.COMPUTE_UNITS_FEE * 2;
+
+        // 3. Jito小费(如果有)
+        const jitoFee = tipAmountSol * 2; // 买入和卖出两次
+
+        // 4. 优先费(如果启用)
+        const priorityFeeCost = priorityFee ? FEE_CONSTANTS.PRIORITY_FEE * 2 : 0;
+
+        // 5. 代币账户租金(如果需要创建)
+        const tokenAccountRent = hasTokenAccount ? 0 : FEE_CONSTANTS.TOKEN_ACCOUNT_RENT;
+
+        // 6. Pump买入平台费(买入时1%)
+        const pumpBuyFee = buyAmount * FEE_CONSTANTS.PUMP_BUY_FEE_PERCENTAGE;
+
+        // 7. 估算卖出金额(考虑买入费用和滑点)
+        // 注意: 这是估算值，实际卖出金额会根据实际买入代币数量而变化
+        const estimatedBuyReturn = buyAmount * (1 - FEE_CONSTANTS.PUMP_BUY_FEE_PERCENTAGE - (slippage / 10000));
+
+        // 8. 根据卖出百分比估算卖出金额
+        const estimatedSellAmount = estimatedBuyReturn * (sellPercentage / 100);
+
+        // 9. Pump卖出平台费
+        const pumpSellFee = estimatedSellAmount * FEE_CONSTANTS.PUMP_SELL_FEE_PERCENTAGE;
+
+        // 10. 卖出滑点成本
+        const sellSlippageCost = estimatedSellAmount * (slippage / 10000);
+
+        // 11. 买入滑点成本
+        const buySlippageCost = buyAmount * (slippage / 10000);
+
+        // 12. 安全缓冲
+        const safetyBuffer = FEE_CONSTANTS.SAFETY_BUFFER;
+
+        // 计算总费用
+        const totalFees = baseTxFee +
+            computeUnitsFee +
+            jitoFee +
+            priorityFeeCost +
+            tokenAccountRent +
+            pumpBuyFee +
+            pumpSellFee +
+            buySlippageCost +
+            sellSlippageCost +
+            safetyBuffer;
+
+        // 返回详细的费用结构
+        return {
+            // 基础费用
+            baseTxFee,
+            computeUnitsFee,
+            jitoFee,
+            priorityFeeCost,
+            tokenAccountRent,
+
+            // 买入相关费用
+            pumpBuyFee,
+            buySlippageCost,
+
+            // 卖出相关费用
+            pumpSellFee,
+            sellSlippageCost,
+
+            // 其他
+            safetyBuffer,
+            totalFees,
+
+            // 估算信息
+            estimatedBuyReturn,
+            estimatedSellAmount,
+            estimatedNetReturn: estimatedSellAmount - pumpSellFee - sellSlippageCost,
+
+            // 详细描述
+            feeDetails: {
+                baseTxFee: `${baseTxFee} SOL (${FEE_CONSTANTS.BASE_TX_FEE} * 2)`,
+                computeUnitsFee: `${computeUnitsFee} SOL (${FEE_CONSTANTS.COMPUTE_UNITS_FEE} * 2)`,
+                jitoFee: `${jitoFee} SOL (${tipAmountSol} * 2)`,
+                priorityFeeCost: priorityFee ? `${priorityFeeCost} SOL (${FEE_CONSTANTS.PRIORITY_FEE} * 2)` : '0 SOL (disabled)',
+                tokenAccountRent: hasTokenAccount ? '0 SOL (account exists)' : `${tokenAccountRent} SOL (new account)`,
+
+                // 买入费用
+                pumpBuyFee: `${pumpBuyFee} SOL (${buyAmount} * ${FEE_CONSTANTS.PUMP_BUY_FEE_PERCENTAGE * 100}%)`,
+                buySlippageCost: `${buySlippageCost} SOL (${buyAmount} * ${slippage / 100}%)`,
+
+                // 卖出费用
+                pumpSellFee: `${pumpSellFee} SOL (est. ${estimatedSellAmount} * ${FEE_CONSTANTS.PUMP_SELL_FEE_PERCENTAGE * 100}%)`,
+                sellSlippageCost: `${sellSlippageCost} SOL (est. ${estimatedSellAmount} * ${slippage / 100}%)`,
+
+                // 其他
+                safetyBuffer: `${safetyBuffer} SOL (buffer)`,
+
+                // 估算结果
+                estimatedBuyReturn: `${estimatedBuyReturn} SOL (after fees and slippage)`,
+                estimatedSellAmount: `${estimatedSellAmount} SOL (${sellPercentage}% of return)`,
+                estimatedNetReturn: `${estimatedSellAmount - pumpSellFee - sellSlippageCost} SOL (final est. return)`
+            }
+        };
     }
 
     async calculateFees({remainingLoops, tipAmountSol, amountSol}) {
