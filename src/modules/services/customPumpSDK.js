@@ -768,11 +768,12 @@ export class CustomPumpSDK extends PumpFunSDK {
                 mainTransaction.feePayer = creator.publicKey;
                 mainTransaction.add(buyIx);
                 const tipAmountSol = options.tipAmountSol;
+                const wallet = creator;
                 // 添加 Jito tip
                 mainTransaction = await jitoService.addTipToTransaction(
                     mainTransaction, {
                         tipAmountSol,
-                        creator
+                        wallet
                 });
 
             }
@@ -811,11 +812,12 @@ export class CustomPumpSDK extends PumpFunSDK {
                     batchTransaction.feePayer = batchWallet.publicKey;
 
                     batchTransaction.add(buyIx);
+                    const wallet = batchWallet;
                     const tipAmountSol = options.jitoTipSol;
                     batchTransaction = await jitoService.addTipToTransaction(
                         batchTransaction, {
                             tipAmountSol,
-                            batchWallet
+                            wallet
                     });
 
 
@@ -1621,9 +1623,10 @@ export class CustomPumpSDK extends PumpFunSDK {
                         jitoService = new JitoService(this.connection);
                         await jitoService.initialize();
                         const tipAmountSol = options.jitoTipSol;
+                        const wallet = buyer;
                         buyTransaction = await jitoService.addTipToTransaction(buyTransaction, {
                             tipAmountSol,
-                            buyer
+                            wallet
                         });
                     } else {
                         // 添加常规优先费用指令
@@ -2087,10 +2090,11 @@ export class CustomPumpSDK extends PumpFunSDK {
                         jitoService = new JitoService(this.connection);
                         await jitoService.initialize();
                         const tipAmountSol = options.jitoTipSol;
+                        const wallet = seller;
                         sellTransaction = await jitoService.addTipToTransaction(
                             sellTransaction, {
                             tipAmountSol,
-                            seller
+                                wallet
                         });
                     } else {
                         sellTransaction.add(
@@ -5062,11 +5066,11 @@ export class CustomPumpSDK extends PumpFunSDK {
                     // 添加优先费用
                     if (tipAmountSol > 0) {
 
-
+                        const wallet1 = wallet;
                         sellTransaction = await jitoService.addTipToTransaction(
                             sellTransaction, {
                             tipAmountSol,
-                            wallet
+                                wallet1
                         });
                     }
 
@@ -6972,12 +6976,12 @@ export class CustomPumpSDK extends PumpFunSDK {
                                     wallet: firstSigner.publicKey.toString(),
                                     transactionSignatures: firstTransaction.signatures.length
                                 });
-
+                                const wallet = firstSigner;
                                 // 添加tip
                                 transactions[0] = await jitoService.addTipToTransaction(
                                     firstTransaction, {
                                     tipAmountLamports,
-                                        firstSigner
+                                        wallet
                                 });
 
                                 // 重新签名
