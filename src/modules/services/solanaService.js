@@ -3933,24 +3933,23 @@ export class SolanaService {
             throw error;
         }
     }
-
     async batchBuyAndSell({
-                              groupType,                // 钱包组类型
-                              accountNumbers,          // 账户号码数组或范围对象
-                              tokenAddress,           // 代币地址
-                              amountSol,             // 买入金额 (当买入策略为"fixed"时使用)
-                              amountStrategy = "fixed", // 买入策略: "fixed", "random", "percentage", "all"
-                              amountConfig = {},      // 买入策略的配置
-                              sellPercentage = 100,  // 卖出百分比
-                              slippage = 1000,       // 滑点
-                              tipAmountSol = 0,      // Jito小费
-                              loopCount = 1,         // 循环次数
-                              firstLoopDelay = 0,    // 首轮延迟
-                              options = {}           // 其他选项
+                              groupType,                // Wallet group type
+                              accountNumbers,          // Account numbers array or range object
+                              tokenAddress,           // Token address
+                              amountSol,             // Buy amount (when buy strategy is "fixed")
+                              amountStrategy = "fixed", // Buy strategy: "fixed", "random", "percentage", "all"
+                              amountConfig = {},      // Buy strategy configuration
+                              sellPercentage = 100,  // Sell percentage
+                              slippage = 1000,       // Slippage
+                              tipAmountSol = 0,      // Jito tip
+                              loopCount = 1,         // Loop count
+                              firstLoopDelay = 0,    // First loop delay
+                              options = {}           // Other options
                           }) {
         const startTime = Date.now();
         try {
-            // 处理账户号码范围
+            // Handle account number range
             let processedAccountNumbers;
             if (Array.isArray(accountNumbers)) {
                 processedAccountNumbers = accountNumbers;
@@ -3965,12 +3964,12 @@ export class SolanaService {
 
             const tokenMint = new PublicKey(tokenAddress);
 
-            // 验证买入策略
+            // Validate buy strategy
             if (!['fixed', 'random', 'percentage', 'all'].includes(amountStrategy)) {
                 throw new Error('Invalid amount strategy. Must be one of: fixed, random, percentage, all');
             }
 
-            // 验证买入策略配置
+            // Validate buy strategy configuration
             if (amountStrategy === 'fixed' && (amountSol === undefined || amountSol <= 0)) {
                 throw new Error('Fixed strategy requires a valid amountSol');
             }
@@ -3987,16 +3986,16 @@ export class SolanaService {
                 }
             }
 
-            // 预处理所有钱包和余额信息
+            // Preprocess all wallets and balance information
             const walletsWithBalances = [];
             const skippedInitialAccounts = [];
 
-            logger.info(`开始获取和验证 ${processedAccountNumbers.length} 个钱包...`);
+            logger.info(`Starting to get and validate ${processedAccountNumbers.length} wallets...`);
 
-            // 1. 获取所有钱包和余额
+            // 1. Get all wallets and balances
             for (const accountNumber of processedAccountNumbers) {
                 try {
-                    // 获取钱包
+                    // Get wallet
                     const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
                     if (!wallet) {
                         skippedInitialAccounts.push({
@@ -4006,16 +4005,16 @@ export class SolanaService {
                         continue;
                     }
 
-                    // 获取SOL余额
+                    // Get SOL balance
                     const solBalance = await this.getBalance(wallet.publicKey);
 
-                    // 获取代币余额(如果已持有)
+                    // Get token balance (if already held)
                     let tokenBalance = '0';
                     try {
                         tokenBalance = await this.getTokenBalance(wallet.publicKey, tokenAddress);
                     } catch (error) {
-                        // 代币账户可能不存在，忽略错误
-                        logger.debug(`代币账户可能不存在: ${wallet.publicKey.toString()}`);
+                        // Token account may not exist, ignore error
+                        logger.debug(`Token account may not exist: ${wallet.publicKey.toString()}`);
                     }
 
                     walletsWithBalances.push({
@@ -4026,7 +4025,7 @@ export class SolanaService {
                         tokenBalance
                     });
                 } catch (error) {
-                    logger.error(`获取钱包或余额失败: ${groupType}-${accountNumber}`, error);
+                    logger.error(`Failed to get wallet or balance: ${groupType}-${accountNumber}`, error);
                     skippedInitialAccounts.push({
                         accountNumber,
                         reason: error.message
@@ -4035,18 +4034,18 @@ export class SolanaService {
             }
 
             if (walletsWithBalances.length === 0) {
-                throw new Error('没有可用的钱包来执行操作');
+                throw new Error('No available wallets to perform operations');
             }
 
-            logger.info(`已获取 ${walletsWithBalances.length} 个有效钱包，跳过 ${skippedInitialAccounts.length} 个无效钱包`);
+            logger.info(`Retrieved ${walletsWithBalances.length} valid wallets, skipped ${skippedInitialAccounts.length} invalid wallets`);
 
-            // 2. 为每个钱包计算买入金额和费用
+            // 2. Calculate buy amount and fees for each wallet
             const walletsWithAmounts = [];
             const skippedFeeAccounts = [];
 
             for (const walletInfo of walletsWithBalances) {
                 try {
-                    // 根据策略计算买入金额
+                    // Calculate buy amount based on strategy
                     let buyAmount;
 
                     switch (amountStrategy) {
@@ -4058,33 +4057,33 @@ export class SolanaService {
                             const min = amountConfig.minAmount;
                             const max = amountConfig.maxAmount;
                             buyAmount = min + Math.random() * (max - min);
-                            buyAmount = parseFloat(buyAmount.toFixed(9)); // 保留9位小数
+                            buyAmount = parseFloat(buyAmount.toFixed(9)); // Keep 9 decimal places
                             break;
 
                         case 'percentage':
                             const percentage = amountConfig.percentage;
                             buyAmount = (walletInfo.solBalance * percentage) / 100;
-                            buyAmount = parseFloat(buyAmount.toFixed(9)); // 保留9位小数
+                            buyAmount = parseFloat(buyAmount.toFixed(9)); // Keep 9 decimal places
                             break;
 
                         case 'all':
-                            // 保留一小部分SOL用于交易费用
+                            // Keep a small amount of SOL for transaction fees
                             buyAmount = Math.max(0, walletInfo.solBalance - 0.01);
-                            buyAmount = parseFloat(buyAmount.toFixed(9)); // 保留9位小数
+                            buyAmount = parseFloat(buyAmount.toFixed(9)); // Keep 9 decimal places
                             break;
                     }
 
-                    // 如果计算出的买入金额太小或无效，跳过此钱包
-                    if (buyAmount <= 0.000001) { // 最小买入金额
+                    // If calculated buy amount is too small or invalid, skip this wallet
+                    if (buyAmount <= 0.000001) { // Minimum buy amount
                         skippedFeeAccounts.push({
                             accountNumber: walletInfo.accountNumber,
-                            reason: `计算的买入金额太小: ${buyAmount} SOL`,
+                            reason: `Calculated buy amount too small: ${buyAmount} SOL`,
                             solBalance: walletInfo.solBalance
                         });
                         continue;
                     }
 
-                    // 计算费用
+                    // Calculate fees
                     const fees = await this.calculateDetailedFees({
                         buyAmount,
                         sellPercentage,
@@ -4094,10 +4093,10 @@ export class SolanaService {
                         priorityFee: options.usePriorityFee || false
                     });
 
-                    // 计算所需总金额
+                    // Calculate total required amount
                     const totalRequired = buyAmount + fees.totalFees;
 
-                    // 验证余额是否足够
+                    // Validate if balance is sufficient
                     if (walletInfo.solBalance < totalRequired) {
                         skippedFeeAccounts.push({
                             accountNumber: walletInfo.accountNumber,
@@ -4119,25 +4118,25 @@ export class SolanaService {
                         totalRequired
                     });
                 } catch (error) {
-                    logger.error(`为钱包计算费用失败: ${walletInfo.publicKey}`, error);
+                    logger.error(`Failed to calculate fees for wallet: ${walletInfo.publicKey}`, error);
                     skippedFeeAccounts.push({
                         accountNumber: walletInfo.accountNumber,
-                        reason: `费用计算错误: ${error.message}`
+                        reason: `Fee calculation error: ${error.message}`
                     });
                 }
             }
 
             if (walletsWithAmounts.length === 0) {
-                throw new Error('没有钱包有足够的余额用于交易');
+                throw new Error('No wallets have sufficient balance for transactions');
             }
 
-            logger.info(`有 ${walletsWithAmounts.length} 个钱包有足够的余额，跳过 ${skippedFeeAccounts.length} 个余额不足的钱包`);
+            logger.info(`${walletsWithAmounts.length} wallets have sufficient balance, skipped ${skippedFeeAccounts.length} wallets with insufficient balance`);
 
             const allResults = [];
 
-            // 3. 对每轮执行批量操作
+            // 3. Execute batch operations for each round
             for(let loop = 0; loop < loopCount; loop++) {
-                logger.info(`开始执行第 ${loop + 1}/${loopCount} 轮操作`, {
+                logger.info(`Starting execution of round ${loop + 1}/${loopCount}`, {
                     groupType,
                     accountCount: walletsWithAmounts.length,
                     tokenAddress: tokenMint.toString(),
@@ -4145,7 +4144,7 @@ export class SolanaService {
                     amountConfigSummary: JSON.stringify(amountConfig)
                 });
 
-                // 准备本轮操作
+                // Prepare operations for this round
                 const operations = walletsWithAmounts.map(info => ({
                     wallet: info.wallet,
                     mint: tokenMint,
@@ -4157,15 +4156,15 @@ export class SolanaService {
                         slippageBasisPoints: slippage,
                         ...options
                     },
-                    // 添加费用信息以便跟踪
+                    // Add fee information for tracking
                     calculatedFees: info.fees,
                     totalRequired: info.totalRequired
                 }));
 
-                // 执行批量操作
+                // Execute batch operations
                 const results = await this.sdk.batchBuyAndSell(operations);
 
-                // 处理结果
+                // Process results
                 const loopResult = {
                     loopNumber: loop + 1,
                     timestamp: new Date().toISOString(),
@@ -4174,7 +4173,7 @@ export class SolanaService {
                     skipped: [...skippedInitialAccounts, ...skippedFeeAccounts]
                 };
 
-                // 处理每个交易结果
+                // Process each transaction result
                 for (const result of results.results) {
                     const operation = operations.find(
                         op => op.wallet.publicKey.toString() === result.wallet
@@ -4195,7 +4194,42 @@ export class SolanaService {
                             estimatedReturn: operation.calculatedFees.estimatedNetReturn
                         });
 
-                        // 更新账户余额缓存
+                        // Save successful transaction to database
+                        try {
+                            await this.saveTransaction({
+                                signature: result.signature,
+                                mint: tokenMint.toString(),
+                                owner: result.wallet,
+                                type: 'buy_and_sell',
+                                solAmount: result.buyAmount.toString(),
+                                tokenAmount: result.soldAmount.toString(),
+                                tokenDecimals: 6, // Default decimals for Solana tokens
+                                success: true,
+                                pricePerToken: result.pricePerToken || null,
+                                slippage: slippage,
+                                groupType: groupType,
+                                accountNumber: operation.accountNumber,
+                                raw: {
+                                    buyAmountSol: operation.amountSol,
+                                    soldAmount: result.soldAmount,
+                                    solReceived: result.solReceived,
+                                    amountStrategy,
+                                    loopNumber: loop + 1,
+                                    totalLoops: loopCount,
+                                    sellPercentage,
+                                    fees: operation.calculatedFees,
+                                    timestamp: new Date().toISOString()
+                                }
+                            });
+                        } catch (dbError) {
+                            logger.error('Failed to save transaction to database:', {
+                                error: dbError.message,
+                                wallet: result.wallet,
+                                signature: result.signature
+                            });
+                        }
+
+                        // Update account balances cache
                         await this.updateAccountBalances(
                             operation.wallet,
                             tokenMint,
@@ -4207,26 +4241,56 @@ export class SolanaService {
                         loopResult.failed.push({
                             accountNumber: operation.accountNumber,
                             wallet: result.wallet,
-                            error: result.error || '交易失败',
+                            error: result.error || 'Transaction failed',
                             amountStrategy,
                             buyAmountSol: operation.amountSol
                         });
+
+                        // Save failed transaction to database
+                        try {
+                            await this.saveTransaction({
+                                signature: result.signature || null,
+                                mint: tokenMint.toString(),
+                                owner: result.wallet,
+                                type: 'buy_and_sell',
+                                solAmount: operation.amountSol.toString(),
+                                tokenAmount: '0',
+                                success: false,
+                                status: 'failed',
+                                groupType: groupType,
+                                accountNumber: operation.accountNumber,
+                                raw: {
+                                    error: result.error || 'Transaction failed',
+                                    amountStrategy,
+                                    loopNumber: loop + 1,
+                                    totalLoops: loopCount,
+                                    sellPercentage,
+                                    fees: operation.calculatedFees,
+                                    timestamp: new Date().toISOString()
+                                }
+                            });
+                        } catch (dbError) {
+                            logger.error('Failed to save failed transaction to database:', {
+                                error: dbError.message,
+                                wallet: result.wallet
+                            });
+                        }
                     }
                 }
 
                 allResults.push(loopResult);
 
-                // 第一轮后的延迟
+                // Delay after first round
                 if (loop === 0 && firstLoopDelay > 0 && loop < loopCount - 1) {
-                    logger.info(`等待 ${firstLoopDelay}ms 后开始下一轮`);
+                    logger.info(`Waiting ${firstLoopDelay}ms before starting next round`);
                     await new Promise(resolve => setTimeout(resolve, firstLoopDelay));
                 }
             }
 
-            // 4. 汇总结果
+            // 4. Summarize results
             const summary = this.summarizeResults(allResults);
 
-            // 5. 返回完整结果
+            // 5. Return complete results
             return {
                 success: allResults.some(r => r.successful.length > 0),
                 summary: {
@@ -4248,7 +4312,7 @@ export class SolanaService {
             };
 
         } catch (error) {
-            logger.error('批量买卖操作失败:', {
+            logger.error('Batch buy and sell operation failed:', {
                 error: error.message,
                 stack: error.stack,
                 groupType,
