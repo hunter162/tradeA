@@ -243,5 +243,97 @@ export const solanaValidators = {
             .optional()
             .isInt({ min: 0, max: 5000 })
             .withMessage('Wait between bundles must be between 0 and 5000 milliseconds')
+    ],
+    batchBuyAndSell: [
+        body('groupType')
+            .isString()
+            .notEmpty()
+            .withMessage('Group type is required'),
+
+        body('accountNumbers')
+            .custom((value) => {
+                // 数组形式验证
+                if (Array.isArray(value)) {
+                    if (value.length === 0) {
+                        throw new Error('Account numbers array cannot be empty');
+                    }
+                    if (value.length > 1000) {
+                        throw new Error('Too many accounts (max 1000)');
+                    }
+                    const isValid = value.every(num =>
+                        Number.isInteger(num) && num >= 1 && num <= 1000
+                    );
+                    if (!isValid) {
+                        throw new Error('Account numbers must be integers between 1 and 1000');
+                    }
+                    return true;
+                }
+
+                // 范围对象形式验证
+                if (typeof value === 'object' && 'start' in value && 'end' in value) {
+                    const start = Number(value.start);
+                    const end = Number(value.end);
+
+                    if (!Number.isInteger(start) || !Number.isInteger(end)) {
+                        throw new Error('Start and end must be integers');
+                    }
+
+                    if (start < 1 || end > 1000) {
+                        throw new Error('Account range must be between 1 and 1000');
+                    }
+
+                    if (start > end) {
+                        throw new Error('Start must be less than or equal to end');
+                    }
+
+                    if (end - start > 1000) {
+                        throw new Error('Range too large (max 1000 accounts)');
+                    }
+
+                    return true;
+                }
+
+                throw new Error('Invalid account numbers format');
+            })
+            .withMessage('Invalid account numbers format or range'),
+
+        body('tokenAddress')
+            .isString()
+            .matches(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/)
+            .withMessage('Invalid Solana token address'),
+
+        body('amountSol')
+            .isFloat({ min: 0.000001 })
+            .withMessage('Amount must be greater than 0.000001 SOL'),
+
+        body('sellPercentage')
+            .optional()
+            .isFloat({ min: 0, max: 100 })
+            .withMessage('Sell percentage must be between 0 and 100'),
+
+        body('slippage')
+            .optional()
+            .isInt({ min: 0, max: 10000 })
+            .withMessage('Slippage must be between 0 and 10000 basis points'),
+
+        body('tipAmountSol')
+            .optional()
+            .isFloat({ min: 0 })
+            .withMessage('Tip amount must be non-negative'),
+
+        body('loopCount')
+            .optional()
+            .isInt({ min: 1, max: 10 })
+            .withMessage('Loop count must be between 1 and 10'),
+
+        body('firstLoopDelay')
+            .optional()
+            .isInt({ min: 0, max: 300000 })
+            .withMessage('First loop delay must be between 0 and 300000 ms'),
+
+        body('options')
+            .optional()
+            .isObject()
+            .withMessage('Options must be an object')
     ]
 }; 

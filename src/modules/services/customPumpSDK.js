@@ -2,7 +2,7 @@ import {createRequire} from 'module';
 import pkg from 'pumpdotfun-sdk';
 import {AnchorProvider, BorshCoder, Program} from "@coral-xyz/anchor";
 import {logger} from '../utils/index.js';
-
+import { AccountLayout as TokenAccountLayout } from '@solana/spl-token';
 import {
     ComputeBudgetProgram,
     Connection,
@@ -1056,46 +1056,38 @@ export class CustomPumpSDK extends PumpFunSDK {
     }
 
     // 辅助函数：计算带滑点的购买金额
-    async calculateWithSlippageBuy(buyAmount, slippageOptions) {
+    async calculateWithSlippageBuy(tokenAmount, slippageBasisPoints) {
+        if (tokenAmount === undefined || tokenAmount === null) {
+            logger.error('calculateWithSlippageBuy收到undefined输入', {
+                tokenAmount: 'undefined/null',
+                slippageBasisPoints: slippageBasisPoints?.toString()
+            });
+            throw new Error('计算滑点时tokenAmount为undefined或null');
+        }
+
+        if (slippageBasisPoints === undefined || slippageBasisPoints === null) {
+            logger.error('calculateWithSlippageBuy收到undefined滑点', {
+                tokenAmount: tokenAmount.toString()
+            });
+            throw new Error('计算滑点时slippageBasisPoints为undefined或null');
+        }
+
         try {
-            // Extract slippage basis points from options
-            let basisPoints;
-            if (typeof slippageOptions === 'object') {
-                basisPoints = slippageOptions.slippageBasisPoints || 100;
-            } else {
-                basisPoints = slippageOptions || 100;
-            }
-
-            // Ensure buyAmount is BigInt
-            const amount = typeof buyAmount === 'bigint' ?
-                buyAmount :
-                BigInt(buyAmount.toString());
-
-            // Ensure basisPoints is BigInt
-            const basisPointsBN = typeof basisPoints === 'bigint' ?
-                basisPoints :
-                BigInt(basisPoints.toString());
-
-            // Calculate with BigInt
-            const TEN_THOUSAND = BigInt(10000);
-            const slippageAmount = (amount * basisPointsBN) / TEN_THOUSAND;
-            const finalAmount = amount + slippageAmount;
-
-            logger.debug('滑点计算:', {
-                originalAmount: amount.toString(),
-                slippageBasisPoints: basisPointsBN.toString(),
-                slippageAmount: slippageAmount.toString(),
-                finalAmount: finalAmount.toString()
+            // 您的原有计算逻辑
+            const minTokenAmount = tokenAmount - (tokenAmount * slippageBasisPoints) / BigInt(10000);
+            logger.info('calculateWithSlippageBuy计算结果:', {
+                tokenAmount: tokenAmount.toString(),
+                slippageBasisPoints: slippageBasisPoints.toString(),
+                minTokenAmount: minTokenAmount.toString()
             });
-
-            return finalAmount;
+            return minTokenAmount;
         } catch (error) {
-            logger.error('计算滑点失败:', {
-                buyAmount,
+            logger.error('calculateWithSlippageBuy计算异常:', {
                 error: error.message,
-                slippageOptions: JSON.stringify(slippageOptions)
+                tokenAmount: tokenAmount.toString(),
+                slippageBasisPoints: slippageBasisPoints.toString()
             });
-            throw new Error(`Failed to calculate slippage: ${error.message}`);
+            throw new Error(`滑点买入计算失败: ${error.message}`);
         }
     }
 
@@ -2186,55 +2178,7 @@ export class CustomPumpSDK extends PumpFunSDK {
         }
     }
 
-    async calculateWithSlippageSell(solOutput, slippageOptions) {
-        try {
-            // Extract slippage basis points from options and ensure safe conversion
-            let basisPoints;
-            if (typeof slippageOptions === 'object') {
-                basisPoints = slippageOptions.slippageBasisPoints || 100;
-            } else {
-                basisPoints = slippageOptions || 100;
-            }
 
-            // Safely convert amounts to BigInt
-            const amount = this._ensureBigInt(solOutput);
-            const basisPointsBN = this._ensureBigInt(basisPoints);
-
-            // Calculate with BigInt arithmetic
-            const TEN_THOUSAND = BigInt(10000);
-            const slippageAmount = (amount * basisPointsBN) / TEN_THOUSAND;
-            const finalAmount = amount - slippageAmount;  // Subtract for sell operations
-
-            // Log calculations using string conversion for BigInt values
-            const calculationDetails = {
-                originalAmount: amount.toString(),
-                slippageBasisPoints: basisPointsBN.toString(),
-                slippageAmount: slippageAmount.toString(),
-                minimumOutput: finalAmount.toString()
-            };
-
-            logger.debug('卖出滑点计算:', calculationDetails);
-
-            // Ensure the final amount is not negative
-            if (finalAmount <= BigInt(0)) {
-                throw new Error('Slippage calculation resulted in zero or negative amount');
-            }
-
-            return finalAmount;
-        } catch (error) {
-            // Create a safe error object for logging
-            const errorContext = {
-                solOutput: typeof solOutput === 'bigint' ? solOutput.toString() : solOutput,
-                error: error.message,
-                slippageOptions: typeof slippageOptions === 'bigint' ?
-                    slippageOptions.toString() :
-                    JSON.stringify(slippageOptions)
-            };
-
-            logger.error('计算卖出滑点失败:', errorContext);
-            throw new Error(`Failed to calculate sell slippage: ${error.message}`);
-        }
-    }
 
     // 更新 buildSellTransaction 方法
     async buildSellTransaction(seller, mint, amount, slippage, options = {}) {
@@ -5159,19 +5103,44 @@ export class CustomPumpSDK extends PumpFunSDK {
             throw error;
         }
     }
-     calculateWithSlippageSell(minSolOutput, slippageBasisPoints) {
-        // 将输入转换为数字以确保计算正确
-        const output = typeof minSolOutput === 'bigint' ? Number(minSolOutput) : minSolOutput;
-        const slippage = typeof slippageBasisPoints === 'bigint' ? Number(slippageBasisPoints) : slippageBasisPoints;
+    calculateWithSlippageSell(solAmount, slippageBasisPoints) {
+        if (solAmount === undefined || solAmount === null) {
+            logger.error('calculateWithSlippageSell收到undefined输入', {
+                solAmount: 'undefined/null',
+                slippageBasisPoints: slippageBasisPoints?.toString()
+            });
+            throw new Error('计算滑点时solAmount为undefined或null');
+        }
 
-        // 计算滑点百分比 (基点转换为百分比: 100基点 = 1%)
-        const slippagePercent = slippage / 10000;
+        if (slippageBasisPoints === undefined || slippageBasisPoints === null) {
+            logger.error('calculateWithSlippageSell收到undefined滑点', {
+                solAmount: solAmount.toString()
+            });
+            throw new Error('计算滑点时slippageBasisPoints为undefined或null');
+        }
 
-        // 计算考虑滑点后的最小可接受金额
-        // 卖出时，滑点是减少的，所以我们从预期金额中减去滑点百分比
-        return output * (1 - slippagePercent);
+        try {
+            // 您的原有计算逻辑
+            const minSolAmount = solAmount - (solAmount * slippageBasisPoints) / BigInt(10000);
+            logger.info('calculateWithSlippageSell计算结果:', {
+                solAmount: solAmount.toString(),
+                slippageBasisPoints: slippageBasisPoints.toString(),
+                minSolAmount: minSolAmount.toString()
+            });
+            return minSolAmount;
+        } catch (error) {
+            logger.error('calculateWithSlippageSell计算异常:', {
+                error: error.message,
+                solAmount: solAmount.toString(),
+                slippageBasisPoints: slippageBasisPoints.toString()
+            });
+            throw new Error(`滑点卖出计算失败: ${error.message}`);
+        }
     }
     async batchBuyAndSell(operations, options = {}) {
+
+        logger.info("operations",{operations})
+        logger.info("options",{options})
         const startTime = Date.now();
         let jitoService = null;
         const results = [];
@@ -5183,15 +5152,26 @@ export class CustomPumpSDK extends PumpFunSDK {
             }
 
             // 格式化操作数组为统一格式
-            const normalizedOperations = operations.map(op => ({
-                wallet: op.wallet,
-                mint: op.mint instanceof PublicKey ? op.mint : new PublicKey(op.mint),
-                buyAmountLamports: op.buyAmountLamports ? BigInt(op.buyAmountLamports) : undefined,
-                sellAmount: op.sellAmount ? BigInt(op.sellAmount) : undefined,
-                options: {
-                    slippageBasisPoints: op.slippageBasisPoints || 1000
-                }
-            }));
+            const normalizedOperations = operations.map(op => {
+                // Convert SOL to lamports if amountSol exists
+                const buyAmountLamports = op.amountSol
+                    ? BigInt(Math.floor(op.amountSol * LAMPORTS_PER_SOL))
+                    : undefined;
+                logger.info('转换SOL到Lamports:', {
+                    originalAmount: op.amountSol,
+                    convertedLamports: buyAmountLamports ? buyAmountLamports.toString() : 'undefined'
+                });
+
+                return {
+                    wallet: op.wallet,
+                    mint: op.mint instanceof PublicKey ? op.mint : new PublicKey(op.mint),
+                    buyAmountLamports: buyAmountLamports,
+                    sellAmount: op.sellAmount ? BigInt(op.sellAmount) : undefined,
+                    options: {
+                        slippageBasisPoints: op.options?.slippageBasisPoints || 1000
+                    }
+                };
+            });
 
             // 常量定义
             const FEE_CONSTANTS = {
@@ -5381,6 +5361,13 @@ export class CustomPumpSDK extends PumpFunSDK {
 
             for (const op of validOperations) {
                 try {
+                    // Log the operation being processed
+                    logger.info('开始处理操作:', {
+                        wallet: op.wallet.publicKey.toString(),
+                        mint: typeof op.mint === 'string' ? op.mint : op.mint.toBase58(),
+                        buyAmountLamports: op.buyAmountLamports
+                    });
+
                     let transaction = new Transaction();
 
                     // 添加计算预算指令
@@ -5389,73 +5376,225 @@ export class CustomPumpSDK extends PumpFunSDK {
                             units: 400000
                         })
                     );
+
+                    // 确保 mint 是有效的 PublicKey
                     const mintPublicKey = op.mint instanceof PublicKey ?
                         op.mint : new PublicKey(op.mint);
-                    const buyAmountLamportsBigInt = BigInt(op.buyAmountLamports);
+
+                    // 检查 buyAmountLamports 是否存在
+
+                    if (op.buyAmountLamports === undefined || op.buyAmountLamports === null) {
+                        throw new Error(`操作中未定义买入金额 (buyAmountLamports): ${op.wallet.publicKey.toBase58()}`);
+                    }
+
+                    // 将 lamports 转换为 BigInt，并确保此过程不会出错
+                    let buyAmountLamportsBigInt;
+                    try {
+                        buyAmountLamportsBigInt = BigInt(op.buyAmountLamports);
+                        logger.info("买入金额转换为BigInt:", {
+                            original: op.buyAmountLamports,
+                            bigint: buyAmountLamportsBigInt.toString()
+                        });
+                    } catch (error) {
+                        throw new Error(`无法将买入金额转换为BigInt: ${error.message}, 原始值: ${op.buyAmountLamports}`);
+                    }
+
+                    // 获取绑定曲线账户，并确保其存在
                     const bondingCurveAccount = await this.getBondingCurveAccount(mintPublicKey);
                     if (!bondingCurveAccount) {
                         throw new Error(`找不到绑定曲线账户: ${mintPublicKey.toBase58()}`);
                     }
-                    const globalAccount = await this.getGlobalAccount();
-                    logger.info("globalAccount:", {globalAccount});
 
-                    const tokenAmountToBuy = bondingCurveAccount.getBuyPrice(buyAmountLamportsBigInt);
-                    logger.info("tokenAmountToBuy:", {tokenAmountToBuy});
-
-                    const buyAmountWithSlippage = await this.calculateWithSlippageBuy(
-                        tokenAmountToBuy,
-                        BigInt(op.options?.slippageBasisPoints || 1000)
-                    );
-                    logger.info("buyAmountWithSlippage:", {buyAmountWithSlippage})
-
-                    const buyIx = await this.getBuyInstructions(
-                        op.wallet.publicKey,
-                        mintPublicKey,
-                        globalAccount.feeRecipient,
-                        tokenAmountToBuy,
-                        buyAmountWithSlippage
-                    );
-                    transaction.add(buyIx);
-                    // 5. 计算要卖出的代币数量 (基于买入的百分比)
-                    const expectedSolReturn = bondingCurveAccount.getSellPrice(tokenAmountToBuy, globalAccount.feeBasisPoints);
-                    const sellAmountWithSlippage = this.calculateWithSlippageSell(expectedSolReturn,
-                        BigInt(op.options?.slippageBasisPoints || 1000));
-                    const sellIx = await this.getSellInstructions(
-                        op.wallet.publicKey,
-                        mintPublicKey,
-                        globalAccount.feeRecipient,
-                        tokenAmountToBuy,
-                        sellAmountWithSlippage
-                    );
-                    transaction.add(sellIx);
-                    // 设置交易参数
-                    transaction.recentBlockhash = blockhash;
-                    transaction.feePayer = op.wallet.publicKey;
-                    transaction.lastValidBlockHeight = lastValidBlockHeight;
-                    const simulationResult = await this.connection.simulateTransaction(transaction);
-
-                    if (simulationResult.value.err) {
-                        throw new Error(`交易模拟失败: ${JSON.stringify(simulationResult.value.err)}`);
+                    // 检查绑定曲线账户是否具有必要的方法
+                    if (typeof bondingCurveAccount.getBuyPrice !== 'function') {
+                        throw new Error(`绑定曲线账户缺少getBuyPrice方法: ${mintPublicKey.toBase58()}`);
                     }
 
-                    // 记录模拟结果
-                    logger.info('交易模拟成功:', {
-                        wallet: op.wallet.publicKey.toString(),
-                        logs: simulationResult.value.logs?.slice(0, 5) // 只记录前5条日志
+                    // 获取全局账户
+                    const globalAccount = await this.getGlobalAccount();
+                    if (!globalAccount) {
+                        throw new Error('无法获取全局账户');
+                    }
+                    logger.info("获取到全局账户:", {
+                        feeRecipient: globalAccount.feeRecipient ? globalAccount.feeRecipient.toBase58() : 'undefined',
+                        feeBasisPoints: globalAccount.feeBasisPoints
                     });
-                    transactions.push({
-                        transaction,
-                        operation: op,
-                        simulationResult: simulationResult.value
-                    });
+
+                    // 计算代币购买价格
+                    let tokenAmountToBuy;
+                    try {
+                        tokenAmountToBuy = bondingCurveAccount.getBuyPrice(buyAmountLamportsBigInt);
+                        if (!tokenAmountToBuy) {
+                            throw new Error('getBuyPrice返回undefined或null');
+                        }
+                        logger.info("计算代币购买数量:", {
+                            tokenAmountToBuy: tokenAmountToBuy.toString()
+                        });
+                    } catch (error) {
+                        throw new Error(`计算代币购买价格失败: ${error.message}`);
+                    }
+
+                    // 计算包含滑点的买入价格
+                    let buyAmountWithSlippage;
+                    try {
+                        // 确保滑点参数有效
+                        const slippageBasisPoints = op.options?.slippageBasisPoints !== undefined ?
+                            BigInt(op.options.slippageBasisPoints) : BigInt(1000);
+
+                        logger.info("滑点参数:", {
+                            slippageBasisPoints: slippageBasisPoints.toString()
+                        });
+
+                        buyAmountWithSlippage = await this.calculateWithSlippageBuy(
+                            tokenAmountToBuy,
+                            slippageBasisPoints
+                        );
+
+                        if (!buyAmountWithSlippage) {
+                            throw new Error('计算滑点买入价格返回undefined或null');
+                        }
+
+                        logger.info("计算滑点后买入价格:", {
+                            buyAmountWithSlippage: buyAmountWithSlippage.toString()
+                        });
+                    } catch (error) {
+                        throw new Error(`计算滑点买入价格失败: ${error.message}`);
+                    }
+
+                    // 生成买入指令
+                    try {
+                        const buyIx = await this.getBuyInstructions(
+                            op.wallet.publicKey,
+                            mintPublicKey,
+                            globalAccount.feeRecipient,
+                            tokenAmountToBuy,
+                            buyAmountWithSlippage
+                        );
+                        transaction.add(buyIx);
+                        logger.info("添加买入指令成功");
+                    } catch (error) {
+                        throw new Error(`生成买入指令失败: ${error.message}`);
+                    }
+
+                    // 计算卖出相关的值
+                    let expectedSolReturn, sellAmountWithSlippage;
+                    try {
+                        // 检查getSellPrice方法是否存在
+                        if (typeof bondingCurveAccount.getSellPrice !== 'function') {
+                            throw new Error('绑定曲线账户缺少getSellPrice方法');
+                        }
+
+                        // 检查feeBasisPoints是否有效
+                        if (globalAccount.feeBasisPoints === undefined || globalAccount.feeBasisPoints === null) {
+                            throw new Error('全局账户的feeBasisPoints未定义');
+                        }
+
+                        expectedSolReturn = bondingCurveAccount.getSellPrice(tokenAmountToBuy, globalAccount.feeBasisPoints);
+
+                        if (!expectedSolReturn) {
+                            throw new Error('getSellPrice返回undefined或null');
+                        }
+
+                        logger.info("预期SOL返回金额:", {
+                            expectedSolReturn: expectedSolReturn.toString()
+                        });
+
+                        // 确保滑点参数有效
+                        const slippageBasisPoints = op.options?.slippageBasisPoints !== undefined ?
+                            BigInt(op.options.slippageBasisPoints) : BigInt(1000);
+
+                        sellAmountWithSlippage = this.calculateWithSlippageSell(
+                            expectedSolReturn,
+                            slippageBasisPoints
+                        );
+
+                        if (!sellAmountWithSlippage) {
+                            throw new Error('计算滑点卖出价格返回undefined或null');
+                        }
+
+                        logger.info("计算滑点后卖出价格:", {
+                            sellAmountWithSlippage: sellAmountWithSlippage.toString()
+                        });
+                    } catch (error) {
+                        throw new Error(`计算卖出相关值失败: ${error.message}`);
+                    }
+
+                    // 生成卖出指令
+                    try {
+                        const sellIx = await this.getSellInstructions(
+                            op.wallet.publicKey,
+                            mintPublicKey,
+                            globalAccount.feeRecipient,
+                            tokenAmountToBuy,
+                            sellAmountWithSlippage
+                        );
+                        transaction.add(sellIx);
+                        logger.info("添加卖出指令成功");
+                    } catch (error) {
+                        throw new Error(`生成卖出指令失败: ${error.message}`);
+                    }
+
+                    // 设置交易参数
+                    try {
+                        // 检查blockhash和lastValidBlockHeight是否已定义
+                        if (!blockhash) {
+                            throw new Error('blockhash未定义');
+                        }
+
+                        if (lastValidBlockHeight === undefined || lastValidBlockHeight === null) {
+                            throw new Error('lastValidBlockHeight未定义');
+                        }
+
+                        transaction.recentBlockhash = blockhash;
+                        transaction.feePayer = op.wallet.publicKey;
+                        transaction.lastValidBlockHeight = lastValidBlockHeight;
+
+                        logger.info("设置交易参数成功:", {
+                            blockhash: blockhash,
+                            feePayer: op.wallet.publicKey.toString(),
+                            lastValidBlockHeight: lastValidBlockHeight
+                        });
+                    } catch (error) {
+                        throw new Error(`设置交易参数失败: ${error.message}`);
+                    }
+
+                    // 模拟交易
+                    try {
+                        const simulationResult = await this.connection.simulateTransaction(transaction);
+
+                        if (simulationResult.value.err) {
+                            throw new Error(`交易模拟失败: ${JSON.stringify(simulationResult.value.err)}`);
+                        }
+
+                        // 记录模拟结果
+                        logger.info('交易模拟成功:', {
+                            wallet: op.wallet.publicKey.toString(),
+                            logs: simulationResult.value.logs?.slice(0, 5) // 只记录前5条日志
+                        });
+
+                        // 添加到交易列表
+                        transactions.push({
+                            transaction,
+                            operation: op,
+                            simulationResult: simulationResult.value
+                        });
+                    } catch (error) {
+                        throw new Error(`交易模拟失败: ${error.message}`);
+                    }
                 } catch (error) {
                     logger.error('构建交易失败:', {
                         error: error.message,
-                        wallet: op.wallet.publicKey.toString()
-                    });
-                    results.push({
-                        success: false,
+                        stack: error.stack,
                         wallet: op.wallet.publicKey.toString(),
+                        operation: {
+                            mint: op.mint instanceof PublicKey ? op.mint.toBase58() : op.mint,
+                            buyAmountLamports: op.buyAmountLamports,
+                            options: op.options
+                        }
+                    });
+                    // 将失败的操作添加到一个单独的数组中，以便后续处理
+                    failedOperations.push({
+                        operation: op,
                         error: error.message
                     });
                 }
@@ -5508,17 +5647,40 @@ export class CustomPumpSDK extends PumpFunSDK {
                     } else {
                         // Jito优先上链
                         const batchTxs = batch.map(({ transaction, operation }) => {
-                            transaction.partialSign(operation.wallet);
+                            transaction.sign(operation.wallet);
                             return transaction;
                         });
 
                         // 为第一笔交易添加Jito小费
                         if (config.jitoTipRequired && batchTxs.length > 0) {
-                            const tipAmount = Math.floor(config.jitoTipSol * LAMPORTS_PER_SOL);
-                            batchTxs[0] = await jitoService.addTipToTransaction(
-                                batchTxs[0],
-                                { tipAmount }
-                            );
+                            try {
+                                const tipAmountSol = config.jitoTipSol;
+                                const wallet = batch[0].operation.wallet;  // 获取第一个交易对应的钱包
+
+                                logger.info('准备添加Jito小费:', {
+                                    tipAmountSol,
+                                    wallet: wallet.publicKey.toString()
+                                });
+
+                                batchTxs[0] = await jitoService.addTipToTransaction(
+                                    batchTxs[0],
+                                    {
+                                        tipAmountSol,  // 使用tipAmountSol而不是tipAmount
+                                        wallet         // 明确传递钱包参数
+                                    }
+                                );
+
+                                logger.info('已添加Jito小费并签名成功');
+                            } catch (error) {
+                                logger.error('添加Jito小费失败:', {
+                                    error: error.message,
+                                    stack: error.stack
+                                });
+
+                                // 错误处理：如果添加小费失败，可以考虑改用普通提交
+                                config.normalSubmission = true;
+                                logger.info('因小费添加失败，切换到普通提交模式');
+                            }
                         }
 
                         // 发送bundle
@@ -5544,6 +5706,10 @@ export class CustomPumpSDK extends PumpFunSDK {
                                     timestamp: new Date().toISOString()
                                 });
                             } catch (error) {
+                                logger.error('操作失败BBBB:', {
+                                    error: error.message,
+                                    stack: error.stack
+                                });
                                 results.push({
                                     success: false,
                                     wallet: operation.wallet.publicKey.toString(),
@@ -5569,6 +5735,10 @@ export class CustomPumpSDK extends PumpFunSDK {
                     }
 
                 } catch (error) {
+                    logger.error('操作失败AAAA:', {
+                        error: error.message,
+                        stack: error.stack
+                    });
                     batch.forEach(({ operation }) => {
                         results.push({
                             success: false,

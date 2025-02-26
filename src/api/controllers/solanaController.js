@@ -1053,4 +1053,95 @@ export class SolanaController {
             });
         }
     }
+    async batchBuyAndSell(req, res) {
+        try {
+            const {
+                groupType,
+                accountNumbers,
+                tokenAddress,
+                amountSol,
+                sellPercentage = 100,
+                slippage = 1000,
+                tipAmountSol = 0,
+                loopCount = 1,
+                firstLoopDelay = 0,
+                options = {}
+            } = req.body;
+
+            logger.info('批量买卖请求:', {
+                groupType,
+                accountNumbers: Array.isArray(accountNumbers)
+                    ? `Array[${accountNumbers.length}]`
+                    : `Range[${accountNumbers.start}-${accountNumbers.end}]`,
+                tokenAddress,
+                amountSol,
+                sellPercentage,
+                loopCount
+            });
+
+            const result = await this.solanaService.batchBuyAndSell({
+                groupType,
+                accountNumbers,
+                tokenAddress,
+                amountSol,
+                sellPercentage,
+                slippage,
+                tipAmountSol,
+                loopCount,
+                firstLoopDelay,
+                options
+            });
+
+            const response = {
+                success: true,
+                data: {
+                    summary: {
+                        totalLoops: result.summary.totalLoops,
+                        successful: result.summary.successful,
+                        failed: result.summary.failed,
+                        skipped: result.summary.skipped,
+                        totalBuyAmount: result.summary.totalBuyAmount,
+                        totalSoldAmount: result.summary.totalSoldAmount,
+                        totalSolReceived: result.summary.totalSolReceived
+                    },
+                    timing: {
+                        startTime: result.timing.startTime,
+                        endTime: result.timing.endTime,
+                        duration: result.timing.duration
+                    },
+                    loopDetails: result.details.map(loop => ({
+                        loopNumber: loop.loopNumber,
+                        timestamp: loop.timestamp,
+                        successful: {
+                            count: loop.successful.length,
+                            transactions: loop.successful
+                        },
+                        failed: {
+                            count: loop.failed.length,
+                            transactions: loop.failed
+                        },
+                        skipped: {
+                            count: loop.skipped.length,
+                            accounts: loop.skipped
+                        }
+                    }))
+                }
+            };
+
+            res.json(response);
+
+        } catch (error) {
+            logger.error('批量买卖处理失败:', {
+                error: error.message,
+                stack: error.stack,
+                params: req.body
+            });
+
+            res.status(400).json({
+                success: false,
+                error: error.message,
+                code: error.code || 'BATCH_BUY_SELL_FAILED'
+            });
+        }
+    }
 } 

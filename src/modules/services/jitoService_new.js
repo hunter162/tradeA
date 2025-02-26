@@ -139,18 +139,19 @@ export class JitoService {
     /**
      * 为单个交易添加小费
      */
+    /**
+     * 为单个交易添加小费
+     */
     async addTipToTransaction(transaction, options = {}) {
         // 获取tip账户，优先使用传入的，否则获取一个
         const tipAccount = options.tipAccount || await this.getTipAccount();
         const LAMPORTS_PER_SOL = 1000000000;
-        // 设置tip金额，优先使用传入的tipAmount，否则使用config中的默认值
-        let tipAmount;
 
-       if (options.tipAmountSol !== undefined) {
+        // 设置tip金额，优先使用传入的tipAmountSol，否则使用config中的默认值
+        let tipAmount;
+        if (options.tipAmountSol !== undefined) {
             tipAmount = Math.floor(options.tipAmountSol * LAMPORTS_PER_SOL);
-        }
-        // 使用默认值
-        else {
+        } else {
             tipAmount = this.config.tipAmount;
         }
 
@@ -161,6 +162,15 @@ export class JitoService {
             throw new Error('Transaction feePayer is required');
         }
 
+        // 创建全新的交易而不是修改现有交易
+        const newTransaction = new Transaction();
+        newTransaction.feePayer = transaction.feePayer;
+        newTransaction.recentBlockhash = transaction.recentBlockhash;
+
+        if (transaction.lastValidBlockHeight) {
+            newTransaction.lastValidBlockHeight = transaction.lastValidBlockHeight;
+        }
+
         // 创建小费指令
         const tipInstruction = SystemProgram.transfer({
             fromPubkey: transaction.feePayer,
@@ -168,17 +178,85 @@ export class JitoService {
             lamports: tipAmount
         });
 
-        // 添加小费指令到交易的开头
-        const newTransaction = new Transaction();
-        newTransaction.feePayer = transaction.feePayer;
-        newTransaction.recentBlockhash = transaction.recentBlockhash;
-
         // 先添加小费指令
         newTransaction.add(tipInstruction);
+
         // 再添加原交易的所有指令
         transaction.instructions.forEach(ix => newTransaction.add(ix));
 
+        // 关键部分：始终重新签名整个交易
+        if (options.wallet) {
+            // 清除可能存在的无效部分签名
+            newTransaction.signatures = [];
+
+            // 使用钱包完全签名整个交易
+            newTransaction.sign(options.wallet);
+
+            logger.info('添加小费后重新签名交易:', {
+                wallet: options.wallet.publicKey.toString(),
+                tipAmount: tipAmount,
+                signatureCount: newTransaction.signatures.length
+            });
+        } else {
+            throw new Error('必须提供钱包来签名小费交易');
+        }
+
         return newTransaction;
+    }
+
+    verifyTransactionSignatures(transactions) {
+        for (let i = 0; i < transactions.length; i++) {
+            const tx = transactions[i];
+
+            // 检查feePayer是否设置
+            if (!tx.feePayer) {
+                throw new Error(`交易 #${i+1} 没有设置feePayer`);
+            }
+
+            // 检查是否有最近的区块哈希
+            if (!tx.recentBlockhash) {
+                throw new Error(`交易 #${i+1} 没有设置recentBlockhash`);
+            }
+
+            // 检查feePayer是否已签名
+            const feePayerSigned = tx.signatures.some(s =>
+                s.publicKey.equals(tx.feePayer) && s.signature !== null
+            );
+
+            if (!feePayerSigned) {
+                throw new Error(`交易 #${i+1} 缺少feePayer的签名: ${tx.feePayer.toBase58()}`);
+            }
+
+            // 检查所有指令的必要签名
+            const requiredSigners = new Set();
+            requiredSigners.add(tx.feePayer.toBase58());
+
+            tx.instructions.forEach((ix, ixIndex) => {
+                ix.keys.forEach((key, keyIndex) => {
+                    if (key.isSigner) {
+                        requiredSigners.add(key.pubkey.toBase58());
+                    }
+                });
+            });
+
+            // 验证所有必要的签名都存在
+            for (const requiredSigner of requiredSigners) {
+                const signerPubkey = new PublicKey(requiredSigner);
+                const hasSigned = tx.signatures.some(s =>
+                    s.publicKey.equals(signerPubkey) && s.signature !== null
+                );
+
+                if (!hasSigned) {
+                    throw new Error(`交易 #${i+1} 缺少必要的签名: ${requiredSigner}`);
+                }
+            }
+
+            logger.info(`交易 #${i+1} 签名验证通过`, {
+                feePayer: tx.feePayer.toBase58(),
+                signatureCount: tx.signatures.length,
+                requiredSignersCount: requiredSigners.size
+            });
+        }
     }
     /**
      * 批量发送交易
@@ -227,13 +305,29 @@ export class JitoService {
         if (!hasTip) {
             throw new Error('Bundle 必须包含 tip 交易');
         }
+        // 验证所有交易都有必要的签名
+        this.verifyTransactionSignatures(transactions);
+
 
         for (let attempt = 1; attempt <= this.config.retryAttempts; attempt++) {
             try {
                 // 序列化交易，使用 base64 编码（更快）
-                const serializedTxs = transactions.map(tx =>
-                    tx.serialize().toString('base64')
-                );
+                const serializedTxs = transactions.map(tx => {
+                    try {
+                        return tx.serialize().toString('base64');
+                    } catch (error) {
+                        logger.error('交易序列化失败:', {
+                            error: error.message,
+                            feePayer: tx.feePayer?.toBase58(),
+                            signaturesCount: tx.signatures.length,
+                            signatures: tx.signatures.map(s => ({
+                                pubkey: s.publicKey.toBase58(),
+                                hasSignature: s.signature !== null
+                            }))
+                        });
+                        throw error;
+                    }
+                });
 
                 // 构建请求头
                 const headers = {

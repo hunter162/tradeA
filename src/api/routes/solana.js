@@ -410,6 +410,13 @@ export function createSolanaRoutes(solanaController) {
             await solanaController.batchSellDirect(req, res);
         }
     );
+    router.post('/tokens/batch-buy-sell',
+        solanaValidators.batchBuyAndSell,
+        validateRequest,
+        async (req, res) => {
+            await solanaController.batchBuyAndSell(req, res);
+        }
+    );
     return router;
 }
 

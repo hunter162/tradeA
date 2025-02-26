@@ -1748,61 +1748,171 @@ export class SolanaService {
         }
     }
 
-    async updateAccountBalances(wallet, mint, tokenAmount, solAmount) {
+    /**
+     * 更新账户余额信息
+     * @param {object|string} wallet - 钱包对象或钱包地址
+     * @param {PublicKey|string} tokenMint - 代币mint地址
+     * @param {number|string} soldAmount - 卖出的代币数量
+     * @param {number|string} solReceived - 收到的SOL数量
+     */
+    async updateAccountBalances(wallet, tokenMint, soldAmount, solReceived) {
         try {
-            logger.info('开始更新账户余额:', {
-                wallet: wallet.publicKey.toString(),
-                mint: mint?.toString(),
-                tokenAmount: tokenAmount?.toString(),
-                solAmount: solAmount?.toString()
-            });
+            // 确保钱包地址是字符串格式
+            const walletAddress = typeof wallet === 'string'
+                ? wallet
+                : wallet?.publicKey instanceof PublicKey
+                    ? wallet.publicKey.toString()
+                    : wallet?.publicKey
+                        ? new PublicKey(wallet.publicKey).toString()
+                        : null;
 
-            // 1. 更新 Redis 缓存
-            if (this.redis) {
-                // 更新代币余额缓存
-                if (mint && tokenAmount !== undefined) {
-                    const tokenBalanceKey = `token:balance:${wallet.publicKey.toString()}:${mint}`;
-                    const tokenBalanceData = {
-                        amount: tokenAmount.toString(),
-                        lastUpdate: Date.now()
-                    };
-                    await this.redis.set(
-                        tokenBalanceKey,
-                        JSON.stringify(tokenBalanceData),
-                        'EX',
-                        300
-                    );
-                }
-
-                // 更新 SOL 余额缓存
-                if (solAmount !== undefined) {
-                    await this.getBalanceUpdate(wallet.publicKey.toString())
-                }
-                logger.debug('Redis 缓存更新成功');
+            if (!walletAddress) {
+                throw new Error('无效的钱包地址');
             }
 
-            // 2. 更新数据库
-            if (mint) {
-                await db.models.TokenBalance.upsert({
-                    owner: wallet.publicKey.toString(),
-                    mint: mint.toString(),
-                    balance: tokenAmount.toString(),
-                    updatedAt: new Date()
+            // 确保代币mint地址是字符串格式
+            const mintAddress = typeof tokenMint === 'string'
+                ? tokenMint
+                : tokenMint instanceof PublicKey
+                    ? tokenMint.toString()
+                    : null;
+
+            if (!mintAddress) {
+                throw new Error('无效的代币地址');
+            }
+
+            logger.info('更新账户余额:', {
+                wallet: walletAddress,
+                mint: mintAddress,
+                soldAmount: soldAmount?.toString() || '0',
+                solReceived: solReceived?.toString() || '0'
+            });
+
+            // 1. 更新SOL余额缓存
+            try {
+                const currentSolBalance = await this.connection.getBalance(new PublicKey(walletAddress));
+
+                // 如果使用了余额缓存系统
+                if (this.balanceCache) {
+                    await this.balanceCache.updateSolBalance(walletAddress, currentSolBalance);
+                    logger.info('已更新SOL余额缓存:', {
+                        wallet: walletAddress,
+                        balance: currentSolBalance / LAMPORTS_PER_SOL
+                    });
+                }
+            } catch (solError) {
+                logger.warn('更新SOL余额缓存失败:', {
+                    error: solError.message,
+                    wallet: walletAddress
                 });
             }
 
-            return {
-                tokenBalance: tokenAmount?.toString(),
-                solBalance: solAmount?.toString(),
-                timestamp: Date.now()
-            };
+            // 2. 更新代币余额缓存
+            try {
+                // 检查代币账户是否存在
+                const tokenAccount = await this.findTokenAccount(new PublicKey(walletAddress), new PublicKey(mintAddress));
 
+                if (tokenAccount) {
+                    const tokenBalance = await this.connection.getTokenAccountBalance(tokenAccount.address);
+
+                    // 如果使用了余额缓存系统
+                    if (this.balanceCache) {
+                        await this.balanceCache.updateTokenBalance(
+                            walletAddress,
+                            mintAddress,
+                            tokenBalance.value.amount,
+                            tokenBalance.value.decimals
+                        );
+
+                        logger.info('已更新代币余额缓存:', {
+                            wallet: walletAddress,
+                            mint: mintAddress,
+                            balance: tokenBalance.value.uiAmount
+                        });
+                    }
+                } else {
+                    logger.info('代币账户不存在，无需更新余额:', {
+                        wallet: walletAddress,
+                        mint: mintAddress
+                    });
+                }
+            } catch (tokenError) {
+                logger.warn('更新代币余额缓存失败:', {
+                    error: tokenError.message,
+                    wallet: walletAddress,
+                    mint: mintAddress
+                });
+            }
+
+            // 3. 如果有订阅服务，更新订阅
+            if (this.subscriptionService) {
+                try {
+                    // 订阅SOL余额变化
+                    await this.subscriptionService.subscribeToSolBalance(walletAddress);
+
+                    // 订阅代币余额变化
+                    await this.subscriptionService.subscribeToTokenBalance(walletAddress, mintAddress);
+
+                    logger.info('已更新余额订阅:', {
+                        wallet: walletAddress,
+                        mint: mintAddress
+                    });
+                } catch (subError) {
+                    logger.warn('更新余额订阅失败:', {
+                        error: subError.message,
+                        wallet: walletAddress,
+                        mint: mintAddress
+                    });
+                }
+            }
+
+            return true;
         } catch (error) {
             logger.error('更新账户余额失败:', {
                 error: error.message,
-                wallet: wallet.publicKey.toString(),
-                mint: mint?.toString()
+                stack: error.stack,
+                wallet: typeof wallet === 'string'
+                    ? wallet
+                    : wallet?.publicKey?.toString() || 'unknown',
+                mint: typeof tokenMint === 'string'
+                    ? tokenMint
+                    : tokenMint?.toString() || 'unknown'
             });
+            return false;
+        }
+    }
+
+    /**
+     * 查找指定钱包的指定代币账户
+     * @param {PublicKey} ownerAddress - 钱包公钥
+     * @param {PublicKey} mintAddress - 代币地址
+     * @returns {Promise<{address: PublicKey, mint: PublicKey, owner: PublicKey}|null>}
+     */
+    async findTokenAccount(ownerAddress, mintAddress) {
+        try {
+            const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
+                ownerAddress,
+                { mint: mintAddress }
+            );
+
+            if (tokenAccounts.value.length === 0) {
+                return null;
+            }
+
+            // 找到第一个匹配的账户
+            const account = tokenAccounts.value[0];
+            return {
+                address: account.pubkey,
+                mint: new PublicKey(account.account.data.parsed.info.mint),
+                owner: new PublicKey(account.account.data.parsed.info.owner)
+            };
+        } catch (error) {
+            logger.error('查找代币账户失败:', {
+                error: error.message,
+                owner: ownerAddress.toString(),
+                mint: mintAddress.toString()
+            });
+            return null;
         }
     }
 
@@ -3825,29 +3935,48 @@ export class SolanaService {
     }
 
     async batchBuyAndSell({
-                              groupType,
-                              accountNumbers,
-                              tokenAddress,
-                              amountSol,
-                              sellPercentage = 100,
-                              slippage = 1000,
-                              tipAmountSol = 0,
-                              loopCount = 1,
-                              firstLoopDelay = 0,
-                              options = {}
+                              groupType,                // 钱包组类型
+                              accountNumbers,          // 账户号码数组或范围对象
+                              tokenAddress,           // 代币地址
+                              amountSol,             // 买入金额
+                              sellPercentage = 100,  // 卖出百分比
+                              slippage = 1000,       // 滑点
+                              tipAmountSol = 0,      // Jito小费
+                              loopCount = 1,         // 循环次数
+                              firstLoopDelay = 0,    // 首轮延迟
+                              options = {}           // 其他选项
                           }) {
+        const startTime = Date.now();
         try {
-            const allResults = [];
+            // 处理账户号码范围
+            let processedAccountNumbers;
+            if (Array.isArray(accountNumbers)) {
+                processedAccountNumbers = accountNumbers;
+            } else if (typeof accountNumbers === 'object' && 'start' in accountNumbers && 'end' in accountNumbers) {
+                processedAccountNumbers = Array.from(
+                    { length: accountNumbers.end - accountNumbers.start + 1 },
+                    (_, i) => accountNumbers.start + i
+                );
+            } else {
+                throw new Error('Invalid account numbers format');
+            }
+
             const tokenMint = new PublicKey(tokenAddress);
 
+            const allResults = [];
+
             for(let loop = 0; loop < loopCount; loop++) {
-                console.log(`Starting execution loop ${loop + 1}/${loopCount}`);
+                logger.info(`开始执行第 ${loop + 1}/${loopCount} 轮操作`, {
+                    groupType,
+                    accountCount: processedAccountNumbers.length,
+                    tokenAddress: tokenMint.toString()
+                });
 
                 const operations = [];
                 const skippedAccounts = [];
 
                 // 处理每个账户
-                for (const accountNumber of accountNumbers) {
+                for (const accountNumber of processedAccountNumbers) {
                     try {
                         const wallet = await this.walletService.getWalletKeypair(groupType, accountNumber);
                         const balance = await this.connection.getBalance(wallet.publicKey);
@@ -3865,7 +3994,7 @@ export class SolanaService {
                             skippedAccounts.push({
                                 accountNumber,
                                 reason: 'Insufficient balance',
-                                balance,
+                                balance: balance / LAMPORTS_PER_SOL,
                                 required: totalRequired
                             });
                             continue;
@@ -3885,7 +4014,7 @@ export class SolanaService {
                         });
 
                     } catch (error) {
-                        console.error(`Failed to process account: ${groupType}-${accountNumber}`, error);
+                        logger.error(`处理账户失败: ${groupType}-${accountNumber}`, error);
                         skippedAccounts.push({
                             accountNumber,
                             reason: error.message
@@ -3894,7 +4023,7 @@ export class SolanaService {
                 }
 
                 if (operations.length === 0) {
-                    console.warn(`No valid operations for loop ${loop + 1}, skipping...`);
+                    logger.warn(`第 ${loop + 1} 轮没有有效操作，跳过`);
                     continue;
                 }
 
@@ -3923,13 +4052,23 @@ export class SolanaService {
                             signature: result.signature,
                             buyAmount: result.buyAmount,
                             soldAmount: result.soldAmount,
-                            solReceived: result.solReceived
+                            solReceived: result.solReceived,
+                            timestamp: new Date().toISOString()
                         });
+
+                        // 更新账户余额缓存
+                        await this.updateAccountBalances(
+                            operation.wallet,
+                            tokenMint,
+                            result.soldAmount,
+                            result.solReceived
+                        );
+
                     } else {
                         loopResult.failed.push({
                             accountNumber: operation.accountNumber,
                             wallet: result.wallet,
-                            error: result.error
+                            error: result.error || '交易失败'
                         });
                     }
                 }
@@ -3938,19 +4077,35 @@ export class SolanaService {
 
                 // 第一轮后的延迟
                 if (loop === 0 && firstLoopDelay > 0 && loop < loopCount - 1) {
+                    logger.info(`等待 ${firstLoopDelay}ms 后开始下一轮`);
                     await new Promise(resolve => setTimeout(resolve, firstLoopDelay));
                 }
             }
 
-            // 返回汇总结果
+            // 汇总结果
+            const summary = this.summarizeResults(allResults);
+
             return {
                 success: allResults.some(r => r.successful.length > 0),
-                summary: this.summarizeResults(allResults),
-                details: allResults
+                summary,
+                details: allResults,
+                timing: {
+                    startTime: new Date(startTime).toISOString(),
+                    endTime: new Date().toISOString(),
+                    duration: `${(Date.now() - startTime) / 1000}s`
+                }
             };
 
         } catch (error) {
-            console.error('Batch operation failed:', error);
+            logger.error('批量买卖操作失败:', {
+                error: error.message,
+                stack: error.stack,
+                groupType,
+                tokenAddress,
+                accountNumbers: Array.isArray(accountNumbers)
+                    ? accountNumbers.length
+                    : `${accountNumbers.start}-${accountNumbers.end}`
+            });
             throw error;
         }
     }
