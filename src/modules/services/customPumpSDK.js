@@ -767,9 +767,12 @@ export class CustomPumpSDK extends PumpFunSDK {
                 mainTransaction.lastValidBlockHeight = lastValidBlockHeight;
                 mainTransaction.feePayer = creator.publicKey;
                 mainTransaction.add(buyIx);
+                const tipAmountSol = options.tipAmountSol;
                 // 添加 Jito tip
-                mainTransaction = await jitoService.addTipToTransaction(mainTransaction, {
-                    tipAmountSol: options.tipAmountSol
+                mainTransaction = await jitoService.addTipToTransaction(
+                    mainTransaction, {
+                        tipAmountSol,
+                        creator
                 });
 
             }
@@ -808,8 +811,11 @@ export class CustomPumpSDK extends PumpFunSDK {
                     batchTransaction.feePayer = batchWallet.publicKey;
 
                     batchTransaction.add(buyIx);
-                    batchTransaction = await jitoService.addTipToTransaction(batchTransaction, {
-                        tipAmountSol: options.tipAmountSol
+                    const tipAmountSol = options.jitoTipSol;
+                    batchTransaction = await jitoService.addTipToTransaction(
+                        batchTransaction, {
+                            tipAmountSol,
+                            batchWallet
                     });
 
 
@@ -1614,8 +1620,10 @@ export class CustomPumpSDK extends PumpFunSDK {
                     if (options.priorityType === 'Jito') {
                         jitoService = new JitoService(this.connection);
                         await jitoService.initialize();
+                        const tipAmountSol = options.jitoTipSol;
                         buyTransaction = await jitoService.addTipToTransaction(buyTransaction, {
-                            tipAmountSol: options.tipAmountSol
+                            tipAmountSol,
+                            buyer
                         });
                     } else {
                         // 添加常规优先费用指令
@@ -2078,8 +2086,11 @@ export class CustomPumpSDK extends PumpFunSDK {
                     if (options.priorityType === 'Jito') {
                         jitoService = new JitoService(this.connection);
                         await jitoService.initialize();
-                        sellTransaction = await jitoService.addTipToTransaction(sellTransaction, {
-                            tipAmountSol: options.tipAmountSol
+                        const tipAmountSol = options.jitoTipSol;
+                        sellTransaction = await jitoService.addTipToTransaction(
+                            sellTransaction, {
+                            tipAmountSol,
+                            seller
                         });
                     } else {
                         sellTransaction.add(
@@ -3336,11 +3347,14 @@ export class CustomPumpSDK extends PumpFunSDK {
                 transaction.recentBlockhash = blockhash;
                 transaction.feePayer = op.wallet.publicKey;
                 transaction.lastValidBlockHeight = lastValidBlockHeight;
-
+                const wallet =  op.wallet;
                 // 添加Jito小费（只对第一笔交易添加）
                 if (index === 0 && jitoService && op.tipAmountLamports > BigInt(0)) {
-                    transaction = await jitoService.addTipToTransaction(transaction, {
-                        tipAmount: op.tipAmountLamports
+                    const tipAmountSol = op.jitoTipSol;
+                    transaction = await jitoService.addTipToTransaction(
+                        transaction, {
+                        tipAmountSol,
+                            wallet
                     });
                 }
 
@@ -4305,11 +4319,15 @@ export class CustomPumpSDK extends PumpFunSDK {
                 transaction.recentBlockhash = blockhash;
                 transaction.feePayer = op.wallet.publicKey;
                 transaction.lastValidBlockHeight = lastValidBlockHeight;
-
+                const tipAmountSol = op.tipAmountLamports
+                const wallet = op.wallet;
                 // 添加Jito小费（只对第一笔交易添加）
                 if (index === 0 && jitoService && op.tipAmountLamports > BigInt(0)) {
-                    transaction = await jitoService.addTipToTransaction(transaction, {
-                        tipAmount: op.tipAmountLamports
+
+                    transaction = await jitoService.addTipToTransaction(
+                        transaction, {
+                        tipAmountSol,
+                        wallet
                     });
                 }
 
@@ -4846,8 +4864,11 @@ export class CustomPumpSDK extends PumpFunSDK {
 
             // 如果指定了，添加Jito小费
             if (addTip && jitoService && op.tipAmountLamports > BigInt(0)) {
+                const tipAmountSol = op.tipAmountLamports;
+                const wallet = op.wallet;
                 transaction = await jitoService.addTipToTransaction(transaction, {
-                    tipAmount: op.tipAmountLamports
+                    tipAmountSol,
+                    wallet
                 });
             }
 
@@ -5040,8 +5061,12 @@ export class CustomPumpSDK extends PumpFunSDK {
 
                     // 添加优先费用
                     if (tipAmountSol > 0) {
-                        sellTransaction = await jitoService.addTipToTransaction(sellTransaction, {
-                            tipAmountSol
+
+
+                        sellTransaction = await jitoService.addTipToTransaction(
+                            sellTransaction, {
+                            tipAmountSol,
+                            wallet
                         });
                     }
 
@@ -6473,7 +6498,8 @@ export class CustomPumpSDK extends PumpFunSDK {
                             op.buyAmountLamports || op.amountLamports,
                             op.totalRequired
                         );
-
+                        const wallet = op.wallet;
+                        const tipAmountSol = config.jitoTipSol;
                         transaction.add(buyIx);
                         transaction.recentBlockhash = blockhash;
                         transaction.feePayer = op.wallet.publicKey;
@@ -6481,8 +6507,10 @@ export class CustomPumpSDK extends PumpFunSDK {
 
                         // 如果是批次中的第一个交易，且使用 Jito，添加小费
                         if (!config.normalSubmission && transactionsToSign.length === 0) {
-                            transaction = await jitoService.addTipToTransaction(transaction, {
-                                tipAmountSol: config.jitoTipSol
+                            transaction = await jitoService.addTipToTransaction(
+                                transaction, {
+                                    tipAmountSol,
+                                    wallet
                             });
                         }
 
@@ -6946,8 +6974,10 @@ export class CustomPumpSDK extends PumpFunSDK {
                                 });
 
                                 // 添加tip
-                                transactions[0] = await jitoService.addTipToTransaction(firstTransaction, {
-                                    tipAmount: tipAmountLamports
+                                transactions[0] = await jitoService.addTipToTransaction(
+                                    firstTransaction, {
+                                    tipAmountLamports,
+                                        firstSigner
                                 });
 
                                 // 重新签名

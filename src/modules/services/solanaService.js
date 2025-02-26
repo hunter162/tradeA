@@ -2700,7 +2700,76 @@ export class SolanaService {
             throw error;
         }
     }
+    async saveTransaction1(txData) {
+        try {
+            // First, log the complete txData for debugging
+            logger.debug('保存交易数据:', {
+                ...txData,
+                raw: undefined // Avoid oversized logs
+            });
 
+            // Add data validation and default value handling
+            const transactionData = {
+                signature: txData.signature,
+                mint: txData.mint,
+                owner: txData.owner,
+                type: txData.type,
+                // Safely handle numeric conversions
+                amount: typeof txData.solAmount !== 'undefined'
+                    ? txData.solAmount.toString()
+                    : '0',  // Set default value
+                tokenAmount: txData.tokenAmount
+                    ? txData.tokenAmount.toString()
+                    : '0',
+                tokenDecimals: txData.tokenDecimals || 6, // Default 6 decimals
+                status: txData.success ? 'success' : 'failed',
+                // Safely handle optional fields
+                pricePerToken: txData.pricePerToken
+                    ? txData.pricePerToken.toString()
+                    : null,
+                slippage: txData.slippage || 0,
+                raw: {
+                    ...txData,
+                    timestamp: new Date().toISOString(),
+                    groupType: txData.groupType,
+                    accountNumber: txData.accountNumber,
+                    percentage: txData.percentage // Save sell percentage
+                },
+                createdAt: new Date(),
+                updatedAt: new Date()
+            };
+
+            // Validate required fields
+            if (!transactionData.signature || !transactionData.mint || !transactionData.owner) {
+                throw new Error('Missing required fields: signature, mint or owner');
+            }
+
+            const transaction = await db.models.Transaction.create(transactionData);
+
+            logger.info('Transaction record saved successfully:', {
+                signature: transaction.signature,
+                type: transaction.type,
+                groupType: txData.groupType,
+                accountNumber: txData.accountNumber
+            });
+
+            return transaction;
+        } catch (error) {
+            logger.error('Failed to save transaction record:', {
+                error: error.message,
+                txData: JSON.stringify({
+                    signature: txData.signature,
+                    mint: txData.mint,
+                    owner: txData.owner,
+                    type: txData.type,
+                    // Only record key fields to avoid oversized logs
+                    groupType: txData.groupType,
+                    accountNumber: txData.accountNumber
+                })
+            });
+            throw error;
+        }
+    }
     // 缓存操作方法
     async cacheTokenBalance(owner, mint, balance) {
         try {
@@ -4197,35 +4266,35 @@ export class SolanaService {
                         // Save successful transaction to database
                         try {
                             await this.saveTransaction({
-                                signature: result.signature,
-                                mint: tokenMint.toString(),
-                                owner: result.wallet,
+                                signature: result.signature || null,
+                                mint: tokenMint ? tokenMint.toString() : tokenAddress,
+                                owner: result.wallet || '',
                                 type: 'buy_and_sell',
-                                solAmount: result.buyAmount.toString(),
-                                tokenAmount: result.soldAmount.toString(),
-                                tokenDecimals: 6, // Default decimals for Solana tokens
+                                solAmount: (result.buyAmount || 0).toString(),
+                                tokenAmount: (result.soldAmount || 0).toString(),
+                                tokenDecimals: 6, // Solana代币的默认小数位
                                 success: true,
                                 pricePerToken: result.pricePerToken || null,
-                                slippage: slippage,
-                                groupType: groupType,
-                                accountNumber: operation.accountNumber,
+                                slippage: slippage || 0,
+                                groupType: groupType || '',
+                                accountNumber: operation ? operation.accountNumber : 0,
                                 raw: {
-                                    buyAmountSol: operation.amountSol,
-                                    soldAmount: result.soldAmount,
-                                    solReceived: result.solReceived,
-                                    amountStrategy,
+                                    buyAmountSol: operation && operation.amountSol ? operation.amountSol : 0,
+                                    soldAmount: result.soldAmount || 0,
+                                    solReceived: result.solReceived || 0,
+                                    amountStrategy: amountStrategy || 'fixed',
                                     loopNumber: loop + 1,
-                                    totalLoops: loopCount,
-                                    sellPercentage,
-                                    fees: operation.calculatedFees,
+                                    totalLoops: loopCount || 1,
+                                    sellPercentage: sellPercentage || 100,
+                                    fees: operation && operation.calculatedFees ? operation.calculatedFees : null,
                                     timestamp: new Date().toISOString()
                                 }
                             });
                         } catch (dbError) {
-                            logger.error('Failed to save transaction to database:', {
+                            logger.error('保存交易到数据库失败:', {
                                 error: dbError.message,
-                                wallet: result.wallet,
-                                signature: result.signature
+                                wallet: result.wallet || 'unknown',
+                                signature: result.signature || 'unknown'
                             });
                         }
 
@@ -4247,32 +4316,33 @@ export class SolanaService {
                         });
 
                         // Save failed transaction to database
+                        // 将失败交易保存到数据库
                         try {
                             await this.saveTransaction({
                                 signature: result.signature || null,
-                                mint: tokenMint.toString(),
-                                owner: result.wallet,
+                                mint: tokenMint ? tokenMint.toString() : tokenAddress,
+                                owner: result.wallet || '',
                                 type: 'buy_and_sell',
-                                solAmount: operation.amountSol.toString(),
+                                solAmount: operation && operation.amountSol ? operation.amountSol.toString() : '0',
                                 tokenAmount: '0',
                                 success: false,
                                 status: 'failed',
-                                groupType: groupType,
-                                accountNumber: operation.accountNumber,
+                                groupType: groupType || '',
+                                accountNumber: operation ? operation.accountNumber : 0,
                                 raw: {
-                                    error: result.error || 'Transaction failed',
-                                    amountStrategy,
+                                    error: result.error || '交易失败',
+                                    amountStrategy: amountStrategy || 'fixed',
                                     loopNumber: loop + 1,
-                                    totalLoops: loopCount,
-                                    sellPercentage,
-                                    fees: operation.calculatedFees,
+                                    totalLoops: loopCount || 1,
+                                    sellPercentage: sellPercentage || 100,
+                                    fees: operation && operation.calculatedFees ? operation.calculatedFees : null,
                                     timestamp: new Date().toISOString()
                                 }
                             });
                         } catch (dbError) {
-                            logger.error('Failed to save failed transaction to database:', {
+                            logger.error('保存失败交易到数据库失败:', {
                                 error: dbError.message,
-                                wallet: result.wallet
+                                wallet: result.wallet || 'unknown'
                             });
                         }
                     }
