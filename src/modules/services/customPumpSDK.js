@@ -1065,37 +1065,105 @@ export class CustomPumpSDK extends PumpFunSDK {
 
     // 辅助函数：计算带滑点的购买金额
     async calculateWithSlippageBuy(tokenAmount, slippageBasisPoints) {
-        if (tokenAmount === undefined || tokenAmount === null) {
-            logger.error('calculateWithSlippageBuy收到undefined输入', {
-                tokenAmount: 'undefined/null',
-                slippageBasisPoints: slippageBasisPoints?.toString()
-            });
-            throw new Error('计算滑点时tokenAmount为undefined或null');
-        }
-
-        if (slippageBasisPoints === undefined || slippageBasisPoints === null) {
-            logger.error('calculateWithSlippageBuy收到undefined滑点', {
-                tokenAmount: tokenAmount.toString()
-            });
-            throw new Error('计算滑点时slippageBasisPoints为undefined或null');
-        }
-
         try {
-            // 您的原有计算逻辑
-            const minTokenAmount = tokenAmount - (tokenAmount * slippageBasisPoints) / BigInt(10000);
-            logger.info('calculateWithSlippageBuy计算结果:', {
-                tokenAmount: tokenAmount.toString(),
-                slippageBasisPoints: slippageBasisPoints.toString(),
-                minTokenAmount: minTokenAmount.toString()
+            // 确保输入在日志记录前是安全的
+            const tokenAmountStr = tokenAmount?.toString() || 'undefined';
+
+            logger.info("tokenAmount, slippageBasisPoints", {
+                tokenAmount: tokenAmountStr,
+                slippageBasisPoints
             });
-            return minTokenAmount;
+
+            // 验证输入
+            if (tokenAmount === undefined || tokenAmount === null) {
+                logger.error('calculateWithSlippageBuy收到undefined输入', {
+                    tokenAmount: 'undefined/null',
+                    slippageBasisPoints: slippageBasisPoints?.toString()
+                });
+                throw new Error('计算滑点时tokenAmount为undefined或null');
+            }
+
+            // 确保 tokenAmount 是 BigInt 类型
+            let tokenAmountBigInt;
+
+            // 检查 tokenAmount 是否已经是 BigInt
+            if (typeof tokenAmount === 'bigint') {
+                tokenAmountBigInt = tokenAmount;
+            } else {
+                // 尝试将 tokenAmount 转换为 BigInt
+                try {
+                    tokenAmountBigInt = BigInt(tokenAmount);
+                } catch (e) {
+                    logger.error('无法将 tokenAmount 转换为 BigInt', {
+                        tokenAmount: tokenAmountStr,
+                        error: e.message
+                    });
+                    throw new Error(`计算滑点时无法处理 tokenAmount: ${e.message}`);
+                }
+            }
+
+            logger.info("tokenAmount1, slippageBasisPoints1", {
+                tokenAmount: tokenAmountBigInt.toString(),
+                slippageBasisPoints
+            });
+
+            // 处理滑点参数
+            let slippageBigInt;
+             // 改进的无效值检查 - 避免使用 isNaN() 于 BigInt
+            if (slippageBasisPoints === undefined || slippageBasisPoints === null ||
+                (typeof slippageBasisPoints === 'string' && slippageBasisPoints.trim() === '') ||
+                (typeof slippageBasisPoints !== 'bigint' && isNaN(Number(slippageBasisPoints)))) {
+
+                logger.error('calculateWithSlippageBuy收到无效滑点', {
+                    tokenAmount: tokenAmountBigInt.toString(),
+                    slippageBasisPoints: String(slippageBasisPoints)
+                });
+                // 使用默认值代替抛出错误
+                slippageBasisPoints = 1000; // 默认10%
+                logger.info('使用默认滑点值(10%/1000基点)');
+            }
+
+            // 安全地转换滑点为 BigInt
+            try {
+                slippageBigInt = BigInt(slippageBasisPoints);
+            } catch (e) {
+                logger.error('无法将滑点转换为 BigInt', {
+                    slippageBasisPoints,
+                    error: e.message
+                });
+                slippageBigInt = BigInt(1000); // 默认使用 10%
+                logger.info('使用默认滑点值(10%/1000基点)');
+            }
+
+            logger.info("tokenAmount2, slippageBasisPoints2", {
+                tokenAmount: tokenAmountBigInt.toString(),
+                slippageBasisPoints: slippageBigInt.toString()
+            });
+
+            const basisPointsBigInt = BigInt(10000); // 基点总数 (100%)
+
+            // 计算滑点金额 (tokenAmount * slippageBasisPoints / 10000)
+            const slippageAmount = (tokenAmountBigInt * slippageBigInt) / basisPointsBigInt;
+
+            // 买入时考虑滑点后的金额 (减少)
+            const adjustedAmount = tokenAmountBigInt - slippageAmount;
+
+            logger.info("计算完成，返回调整后金额", {
+                originalAmount: tokenAmountBigInt.toString(),
+                slippage: slippageBigInt.toString(),
+                slippageAmount: slippageAmount.toString(),
+                adjustedAmount: adjustedAmount.toString()
+            });
+
+            // 结果作为 BigInt 返回，不要尝试转换为 number
+            return adjustedAmount;
         } catch (error) {
-            logger.error('calculateWithSlippageBuy计算异常:', {
+            // 捕获所有异常以确保日志记录
+            logger.error("calculateWithSlippageBuy发生异常", {
                 error: error.message,
-                tokenAmount: tokenAmount.toString(),
-                slippageBasisPoints: slippageBasisPoints.toString()
+                stack: error.stack
             });
-            throw new Error(`滑点买入计算失败: ${error.message}`);
+            throw error; // 重新抛出以便调用者处理
         }
     }
 
@@ -4308,7 +4376,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                     initialBuyPrice,
                     BigInt(op.options?.slippageBasisPoints || 1000)
                 );
-
+                logger.info("initialBuyPrice,buyAmountWithSlippage:",{initialBuyPrice,buyAmountWithSlippage})
                 const buyIx = await this.getBuyInstructions(
                     op.wallet.publicKey,
                     new PublicKey(op.mint),
@@ -4316,7 +4384,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                     initialBuyPrice,
                     buyAmountWithSlippage
                 );
-
+                logger.info("buyIx",{buyIx})
                 transaction.add(buyIx);
 
                 // 设置交易参数
@@ -4327,12 +4395,13 @@ export class CustomPumpSDK extends PumpFunSDK {
                 const wallet = op.wallet;
                 // 添加Jito小费（只对第一笔交易添加）
                 if (index === 0 && jitoService && op.tipAmountLamports > BigInt(0)) {
-
+                    logger.info("buyIx,transaction",{buyIx,transaction})
                     transaction = await jitoService.addTipToTransaction(
                         transaction, {
                         tipAmountSol,
                         wallet
                     });
+                    logger.info("buyIx2,transaction2",{buyIx,transaction})
                 }
 
                 return {

@@ -411,6 +411,74 @@ export class WalletController {
             res.status(error instanceof CustomError ? 400 : 500).json(response);
         }
     }
+    async transferToken(req, res) {
+        try {
+            const { fromGroup, fromAccount, toGroup, toAccount, mintAddress, amount } = req.body;
+
+            // 验证输入
+            if (!fromGroup || !toGroup || !mintAddress || !amount) {
+                throw new Error('Missing required parameters');
+            }
+
+            const fromAccNum = parseInt(fromAccount);
+            const toAccNum = parseInt(toAccount);
+
+            if (isNaN(fromAccNum) || isNaN(toAccNum)) {
+                throw new Error('Account numbers must be integers');
+            }
+
+            const transferAmount = parseFloat(amount);
+            if (isNaN(transferAmount) || transferAmount <= 0) {
+                throw new Error('Invalid transfer amount');
+            }
+
+            logger.info('开始代币转账:', {
+                fromGroup,
+                fromAccount: fromAccNum,
+                toGroup,
+                toAccount: toAccNum,
+                mintAddress,
+                amount: transferAmount
+            });
+
+            const result = await this.walletService.transferToken(
+                fromGroup,
+                fromAccNum,
+                toGroup,
+                toAccNum,
+                mintAddress,
+                transferAmount
+            );
+
+            res.json({
+                success: true,
+                data: {
+                    signature: result.signature,
+                    fromGroup,
+                    fromAccount: fromAccNum,
+                    toGroup,
+                    toAccount: toAccNum,
+                    mintAddress,
+                    amount: transferAmount
+                }
+            });
+        } catch (error) {
+            logger.error('代币转账失败:', {
+                error: error.message,
+                fromGroup: req.body.fromGroup,
+                fromAccount: req.body.fromAccount,
+                toGroup: req.body.toGroup,
+                toAccount: req.body.toAccount,
+                mintAddress: req.body.mintAddress,
+                amount: req.body.amount
+            });
+
+            res.status(400).json({
+                success: false,
+                error: error.message
+            });
+        }
+    }
 
     // 获取代币余额
     async getTokenBalance(req, res) {

@@ -82,7 +82,13 @@ export function createWalletRoutes(walletController) {
             await walletController.closeWallet(req, res);
         })
     );
-
+    router.post('/transfer-token',
+        walletValidators.transferToken,
+        validateRequest,
+        asyncHandler(async (req, res) => {
+            await walletController.transferToken(req, res);
+        })
+    );
     // 批量关闭钱包
     router.post('/:groupType/close-batch',
         walletValidators.closeBatchWallets,

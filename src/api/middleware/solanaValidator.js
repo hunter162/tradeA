@@ -60,10 +60,6 @@ export const solanaValidators = {
             .withMessage('Invalid Solana token mint address')
     ],
     calculateFees: [
-        body('makersCount').isInt()
-            .custom(value => [4, 50, 100, 500, 1000].includes(value))
-            .withMessage('Makers count must be one of: 4, 50, 100, 500, 1000'),
-
         body('amountStrategy').isString()
             .isIn(['fixed', 'random', 'percentage'])
             .withMessage('Invalid amount strategy'),

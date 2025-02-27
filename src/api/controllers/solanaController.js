@@ -830,10 +830,6 @@ export class SolanaController {
                 throw new Error('主账户编号是必需的');
             }
 
-            if (!makersCount || ![4, 50, 100, 500, 1000].includes(makersCount)) {
-                throw new Error('makers数量必须是4/50/100/500/1000之一');
-            }
-
             if (!amountStrategy || !['fixed', 'random', 'percentage'].includes(amountStrategy)) {
                 throw new Error('无效的买入策略');
             }

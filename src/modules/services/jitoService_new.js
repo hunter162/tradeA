@@ -150,7 +150,14 @@ export class JitoService {
         // 设置tip金额，优先使用传入的tipAmountSol，否则使用config中的默认值
         let tipAmount;
         if (options.tipAmountSol !== undefined) {
-            tipAmount = Math.floor(options.tipAmountSol * LAMPORTS_PER_SOL);
+            // 处理 BigInt 情况
+            if (typeof options.tipAmountSol === 'bigint') {
+                // 如果已经是 BigInt，直接使用
+                tipAmount = options.tipAmountSol;
+            } else {
+                // 否则，转换为数字后计算
+                tipAmount = Math.floor(Number(options.tipAmountSol) * LAMPORTS_PER_SOL);
+            }
         } else {
             tipAmount = this.config.tipAmount;
         }
@@ -175,7 +182,7 @@ export class JitoService {
         const tipInstruction = SystemProgram.transfer({
             fromPubkey: transaction.feePayer,
             toPubkey: tipPubkey,
-            lamports: tipAmount
+            lamports: typeof tipAmount === 'bigint' ? tipAmount : BigInt(tipAmount)
         });
 
         // 先添加小费指令

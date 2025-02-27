@@ -13,6 +13,14 @@ export const walletValidators = {
         param('accountNumber').isInt({ min: 1 })
     ],
 
+    transferToken: [
+        body('fromGroup').isString().notEmpty(),
+        body('fromAccount').isInt({ min: 1 }),
+        body('toGroup').isString().notEmpty(),
+        body('toAccount').isInt({ min: 1 }),
+        body('mintAddress').isString().notEmpty(),
+        body('amount').isFloat({ min: 0.000001 })
+    ],
     // 获取代币余额的验证规则
     getTokenBalance: [
         param('groupType').isString().notEmpty(),
