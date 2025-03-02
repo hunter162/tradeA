@@ -6404,7 +6404,7 @@ export class CustomPumpSDK extends PumpFunSDK {
                     } else {
                         throw new Error('No valid amount specified');
                     }
-
+                    logger.info("buyAmountLamportsBigInt",{buyAmountLamportsBigInt});
                     // if (!amountLamports) {
                     //     throw new Error('No valid amount specified');
                     // }

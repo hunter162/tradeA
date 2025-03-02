@@ -4865,6 +4865,7 @@ export class SolanaService {
                        percentageOfBalance,
                        options = {}
                    }) {
+
         try {
             // 1. 参数验证和标准化
             if (!buyerGroup) throw new Error('买入钱包所属组(buyerGroup)为必填项');
