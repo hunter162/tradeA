@@ -6578,8 +6578,11 @@ export class CustomPumpSDK extends PumpFunSDK {
                             op.wallet.publicKey,
                             op.mint,
                             globalAccount.feeRecipient,
-                            op.buyAmountLamports || op.amountLamports,
-                            op.totalRequired
+                            globalAccount.getInitialBuyPrice(op.amountLamports),      // 计算出的代币数量
+                            await this.calculateWithSlippageBuy(                      // 带滑点的代币数量
+                                globalAccount.getInitialBuyPrice(op.amountLamports),
+                                BigInt(op.options?.slippageBasisPoints || 1000)
+                            )
                         );
                         const wallet = op.wallet;
                         const tipAmountSol = config.jitoTipSol;
