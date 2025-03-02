@@ -6403,9 +6403,9 @@ export class CustomPumpSDK extends PumpFunSDK {
                         throw new Error('No valid amount specified');
                     }
 
-                    if (!amountLamports) {
-                        throw new Error('No valid amount specified');
-                    }
+                    // if (!amountLamports) {
+                    //     throw new Error('No valid amount specified');
+                    // }
 
 // // 2. 转换为BigInt
 //                     const buyAmountLamportsBigInt = BigInt(amountLamports);
