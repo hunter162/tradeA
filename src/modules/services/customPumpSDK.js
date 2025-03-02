@@ -1146,17 +1146,17 @@ export class CustomPumpSDK extends PumpFunSDK {
             const slippageAmount = (tokenAmountBigInt * slippageBigInt) / basisPointsBigInt;
 
             // 买入时考虑滑点后的金额 (减少)
-            const adjustedAmount = tokenAmountBigInt - slippageAmount;
+            const minimumTokenAmount = tokenAmountBigInt * (BigInt(10000) - slippageBasisPoints) / BigInt(10000);
 
             logger.info("计算完成，返回调整后金额", {
                 originalAmount: tokenAmountBigInt.toString(),
                 slippage: slippageBigInt.toString(),
                 slippageAmount: slippageAmount.toString(),
-                adjustedAmount: adjustedAmount.toString()
+                adjustedAmount: minimumTokenAmount.toString()
             });
 
             // 结果作为 BigInt 返回，不要尝试转换为 number
-            return adjustedAmount;
+            return minimumTokenAmount;
         } catch (error) {
             // 捕获所有异常以确保日志记录
             logger.error("calculateWithSlippageBuy发生异常", {
@@ -6392,15 +6392,23 @@ export class CustomPumpSDK extends PumpFunSDK {
                             })
                         );
                     }
-                    const amountLamports = op.amountLamports || (op.amountSol ?
-                        (op.amountSol * LAMPORTS_PER_SOL).toString() : null);
+                    let buyAmountLamportsBigInt;
+                    if (typeof op.amountLamports === 'bigint') {
+                        buyAmountLamportsBigInt = op.amountLamports;
+                    } else if (op.amountLamports) {
+                        buyAmountLamportsBigInt = BigInt(op.amountLamports.toString());
+                    } else if (op.amountSol) {
+                        buyAmountLamportsBigInt = BigInt(Math.floor(op.amountSol * LAMPORTS_PER_SOL));
+                    } else {
+                        throw new Error('No valid amount specified');
+                    }
 
                     if (!amountLamports) {
                         throw new Error('No valid amount specified');
                     }
 
-// 2. 转换为BigInt
-                    const buyAmountLamportsBigInt = BigInt(amountLamports);
+// // 2. 转换为BigInt
+//                     const buyAmountLamportsBigInt = BigInt(amountLamports);
 
 // 3. 获取全局账户并计算初始价格
                     const globalAccount = await this.getGlobalAccount();
