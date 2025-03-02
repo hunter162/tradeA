@@ -91,7 +91,6 @@ export class WalletService {
         }
         this.solanaService = solanaService;
         this.encryptionManager = new EncryptionManager(config.encryption.masterKey);
-        this.validGroupTypes = ['main', 'sub', 'trade'];
         this.wallets = new Map();
         
         // 使用 solanaService 中的 redis 实例
@@ -489,9 +488,6 @@ export class WalletService {
 
     // 验证组类型和账户编号
     validateInput(groupType, accountNumber) {
-        if (!this.validGroupTypes.includes(groupType)) {
-            throw new Error(`Invalid group type. Valid types are: ${this.validGroupTypes.join(', ')}`);
-        }
         if (typeof accountNumber !== 'number' || accountNumber < 1) {
             throw new Error('Account number must be a positive integer');
         }
