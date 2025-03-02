@@ -1065,107 +1065,109 @@ export class CustomPumpSDK extends PumpFunSDK {
 
     // 辅助函数：计算带滑点的购买金额
     async calculateWithSlippageBuy(tokenAmount, slippageBasisPoints) {
-        try {
-            // 确保输入在日志记录前是安全的
-            const tokenAmountStr = tokenAmount?.toString() || 'undefined';
+            try {
+                // 确保输入在日志记录前是安全的
+                const tokenAmountStr = tokenAmount?.toString() || 'undefined';
 
-            logger.info("tokenAmount, slippageBasisPoints", {
-                tokenAmount: tokenAmountStr,
-                slippageBasisPoints
-            });
-
-            // 验证输入
-            if (tokenAmount === undefined || tokenAmount === null) {
-                logger.error('calculateWithSlippageBuy收到undefined输入', {
-                    tokenAmount: 'undefined/null',
-                    slippageBasisPoints: slippageBasisPoints?.toString()
+                logger.info("tokenAmount, slippageBasisPoints", {
+                    tokenAmount: tokenAmountStr,
+                    slippageBasisPoints
                 });
-                throw new Error('计算滑点时tokenAmount为undefined或null');
-            }
 
-            // 确保 tokenAmount 是 BigInt 类型
-            let tokenAmountBigInt;
+                // 验证输入
+                if (tokenAmount === undefined || tokenAmount === null) {
+                    logger.error('calculateWithSlippageBuy收到undefined输入', {
+                        tokenAmount: 'undefined/null',
+                        slippageBasisPoints: slippageBasisPoints?.toString()
+                    });
+                    throw new Error('计算滑点时tokenAmount为undefined或null');
+                }
 
-            // 检查 tokenAmount 是否已经是 BigInt
-            if (typeof tokenAmount === 'bigint') {
-                tokenAmountBigInt = tokenAmount;
-            } else {
-                // 尝试将 tokenAmount 转换为 BigInt
+                // 确保 tokenAmount 是 BigInt 类型
+                let tokenAmountBigInt;
+
+                // 检查 tokenAmount 是否已经是 BigInt
+                if (typeof tokenAmount === 'bigint') {
+                    tokenAmountBigInt = tokenAmount;
+                } else {
+                    // 尝试将 tokenAmount 转换为 BigInt
+                    try {
+                        tokenAmountBigInt = BigInt(tokenAmount.toString());
+                    } catch (e) {
+                        logger.error('无法将 tokenAmount 转换为 BigInt', {
+                            tokenAmount: tokenAmountStr,
+                            error: e.message
+                        });
+                        throw new Error(`计算滑点时无法处理 tokenAmount: ${e.message}`);
+                    }
+                }
+
+                logger.info("tokenAmount1, slippageBasisPoints1", {
+                    tokenAmount: tokenAmountBigInt.toString(),
+                    slippageBasisPoints
+                });
+
+                // 处理滑点参数
+                let slippageBigInt;
+                // 改进的无效值检查 - 避免使用 isNaN() 于 BigInt
+                if (slippageBasisPoints === undefined || slippageBasisPoints === null ||
+                    (typeof slippageBasisPoints === 'string' && slippageBasisPoints.trim() === '') ||
+                    (typeof slippageBasisPoints !== 'bigint' && isNaN(Number(slippageBasisPoints)))) {
+
+                    logger.error('calculateWithSlippageBuy收到无效滑点', {
+                        tokenAmount: tokenAmountBigInt.toString(),
+                        slippageBasisPoints: String(slippageBasisPoints)
+                    });
+                    // 使用默认值代替抛出错误
+                    slippageBasisPoints = 1000; // 默认10%
+                    logger.info('使用默认滑点值(10%/1000基点)');
+                }
+
+                // 安全地转换滑点为 BigInt
                 try {
-                    tokenAmountBigInt = BigInt(tokenAmount);
+                    slippageBigInt = BigInt(slippageBasisPoints);
                 } catch (e) {
-                    logger.error('无法将 tokenAmount 转换为 BigInt', {
-                        tokenAmount: tokenAmountStr,
+                    logger.error('无法将滑点转换为 BigInt', {
+                        slippageBasisPoints,
                         error: e.message
                     });
-                    throw new Error(`计算滑点时无法处理 tokenAmount: ${e.message}`);
+                    slippageBigInt = BigInt(1000); // 默认使用 10%
+                    logger.info('使用默认滑点值(10%/1000基点)');
                 }
-            }
 
-            logger.info("tokenAmount1, slippageBasisPoints1", {
-                tokenAmount: tokenAmountBigInt.toString(),
-                slippageBasisPoints
-            });
-
-            // 处理滑点参数
-            let slippageBigInt;
-             // 改进的无效值检查 - 避免使用 isNaN() 于 BigInt
-            if (slippageBasisPoints === undefined || slippageBasisPoints === null ||
-                (typeof slippageBasisPoints === 'string' && slippageBasisPoints.trim() === '') ||
-                (typeof slippageBasisPoints !== 'bigint' && isNaN(Number(slippageBasisPoints)))) {
-
-                logger.error('calculateWithSlippageBuy收到无效滑点', {
+                logger.info("tokenAmount2, slippageBasisPoints2", {
                     tokenAmount: tokenAmountBigInt.toString(),
-                    slippageBasisPoints: String(slippageBasisPoints)
+                    slippageBasisPoints: slippageBigInt.toString()
                 });
-                // 使用默认值代替抛出错误
-                slippageBasisPoints = 1000; // 默认10%
-                logger.info('使用默认滑点值(10%/1000基点)');
-            }
 
-            // 安全地转换滑点为 BigInt
-            try {
-                slippageBigInt = BigInt(slippageBasisPoints);
-            } catch (e) {
-                logger.error('无法将滑点转换为 BigInt', {
-                    slippageBasisPoints,
-                    error: e.message
+                const basisPointsBigInt = BigInt(10000); // 基点总数 (100%)
+
+                // 计算滑点金额 (tokenAmount * slippageBasisPoints / 10000)
+                const slippageAmount = (tokenAmountBigInt * slippageBigInt) / basisPointsBigInt;
+
+                // 计算最低可接受的代币数量（考虑滑点保护）
+                const minimumAcceptableAmount = tokenAmountBigInt - slippageAmount;
+
+                logger.info("计算完成，返回最低可接受代币数量", {
+                    originalAmount: tokenAmountBigInt.toString(),
+                    slippage: slippageBigInt.toString(),
+                    slippageAmount: slippageAmount.toString(),
+                    minimumAcceptableAmount: minimumAcceptableAmount.toString(),
+                    explanation: "滑点作为保护机制，设置最低可接受代币数量。如果市场条件良好，用户实际会收到完整的原始数量。"
                 });
-                slippageBigInt = BigInt(1000); // 默认使用 10%
-                logger.info('使用默认滑点值(10%/1000基点)');
+
+                // 返回最低可接受的代币数量作为保护措施
+                return minimumAcceptableAmount;
+            } catch (error) {
+                // 捕获所有异常以确保日志记录
+                logger.error("calculateWithSlippageBuy发生异常", {
+                    error: error.message,
+                    stack: error.stack
+                });
+                throw error; // 重新抛出以便调用者处理
             }
-
-            logger.info("tokenAmount2, slippageBasisPoints2", {
-                tokenAmount: tokenAmountBigInt.toString(),
-                slippageBasisPoints: slippageBigInt.toString()
-            });
-
-            const basisPointsBigInt = BigInt(10000); // 基点总数 (100%)
-
-            // 计算滑点金额 (tokenAmount * slippageBasisPoints / 10000)
-            const slippageAmount = (tokenAmountBigInt * slippageBigInt) / basisPointsBigInt;
-
-            // 买入时考虑滑点后的金额 (减少)
-            const minimumTokenAmount = tokenAmountBigInt * (BigInt(10000) - slippageBasisPoints) / BigInt(10000);
-
-            logger.info("计算完成，返回调整后金额", {
-                originalAmount: tokenAmountBigInt.toString(),
-                slippage: slippageBigInt.toString(),
-                slippageAmount: slippageAmount.toString(),
-                adjustedAmount: minimumTokenAmount.toString()
-            });
-
-            // 结果作为 BigInt 返回，不要尝试转换为 number
-            return minimumTokenAmount;
-        } catch (error) {
-            // 捕获所有异常以确保日志记录
-            logger.error("calculateWithSlippageBuy发生异常", {
-                error: error.message,
-                stack: error.stack
-            });
-            throw error; // 重新抛出以便调用者处理
         }
-    }
+
 
     // 修改 createTokenMetadata 方法
     async createTokenMetadata(metadata) {
