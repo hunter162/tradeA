@@ -1084,7 +1084,21 @@ export class SolanaController {
             // 验证买入策略参数
             this.validateBuyStrategyParams(amountStrategy, amountSol, amountConfig);
 
-            // 执行批量买卖操作
+            // 添加优化的 RPC 相关选项
+            const optimizedOptions = {
+                ...options,
+                // 新增的 RPC 优化参数
+                bundleMaxSize: options.bundleMaxSize || 3,         // 减小默认批次大小
+                waitBetweenBundles: options.waitBetweenBundles || 1000, // 增加批次间等待时间
+                balanceBatchSize: options.balanceBatchSize || 15,  // 余额查询批次大小
+                balanceBatchDelay: options.balanceBatchDelay || 300, // 余额查询批次间隔
+                simulationBatchSize: options.simulationBatchSize || 5, // 模拟批次大小
+                simulationBatchDelay: options.simulationBatchDelay || 500, // 模拟批次间隔
+                maxConcurrentOperations: options.maxConcurrentOperations || 3, // 最大并发操作数
+                retryAttempts: options.retryAttempts || 5         // 增加重试次数
+            };
+
+            // 执行批量买卖操作 - 调用优化后的 solanaService 方法
             const result = await this.solanaService.batchBuyAndSell({
                 groupType,
                 accountNumbers,
@@ -1097,7 +1111,7 @@ export class SolanaController {
                 tipAmountSol,
                 loopCount,
                 firstLoopDelay,
-                options
+                options: optimizedOptions
             });
 
             // 构建响应数据
