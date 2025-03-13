@@ -5238,94 +5238,237 @@ export class CustomPumpSDK extends PumpFunSDK {
         }
     }
     async batchBuyAndSell(operations, options = {}) {
+
+        logger.info("operations",{operations})
+        logger.info("options",{options})
         const startTime = Date.now();
         let jitoService = null;
+        const results = [];
 
         try {
-            // 1. 配置初始化 - 使用优化后的默认值
-            const config = {
-                bundleMaxSize: options.bundleMaxSize || 3,
-                waitBetweenBundles: options.waitBetweenBundles || 1000,
-                retryAttempts: options.retryAttempts || 5,
-                skipPreflight: options.skipPreflight || false,
-                preflightCommitment: options.preflightCommitment || 'confirmed',
-                timeout: options.timeout || 90000,
-                usePriorityFee: options.usePriorityFee !== undefined ? options.usePriorityFee : true,
-                normalSubmission: options.normalSubmission !== undefined ? options.normalSubmission : false,
-                jitoTipSol: options.jitoTipSol || 0.0001,
-                jitoTipRequired: options.jitoTipRequired !== undefined ? options.jitoTipRequired : true,
-
-                // 新增优化参数
-                balanceBatchSize: options.balanceBatchSize || 15,
-                balanceBatchDelay: options.balanceBatchDelay || 300,
-                simulationBatchSize: options.simulationBatchSize || 5,
-                simulationBatchDelay: options.simulationBatchDelay || 500,
-                maxConcurrentOperations: options.maxConcurrentOperations || 3
-            };
-
-            logger.info('批量买卖开始:', {
-                operationsCount: operations?.length,
-                submissionMethod: config.normalSubmission ? '普通上链' : '优先上链(Jito)',
-                config: {
-                    bundleMaxSize: config.bundleMaxSize,
-                    waitBetweenBundles: config.waitBetweenBundles,
-                    balanceBatchSize: config.balanceBatchSize,
-                    simulationBatchSize: config.simulationBatchSize
-                }
-            });
-
             // 检查操作数组
             if (!Array.isArray(operations) || operations.length === 0) {
                 throw new Error('Invalid operations array');
             }
 
-            // 2. 初始化Jito服务
+            // 格式化操作数组为统一格式
+            const normalizedOperations = operations.map(op => {
+                // Convert SOL to lamports if amountSol exists
+                const buyAmountLamports = op.amountSol
+                    ? BigInt(Math.floor(op.amountSol * LAMPORTS_PER_SOL))
+                    : undefined;
+                logger.info('转换SOL到Lamports:', {
+                    originalAmount: op.amountSol,
+                    convertedLamports: buyAmountLamports ? buyAmountLamports.toString() : 'undefined'
+                });
+
+                return {
+                    wallet: op.wallet,
+                    mint: op.mint instanceof PublicKey ? op.mint : new PublicKey(op.mint),
+                    buyAmountLamports: buyAmountLamports,
+                    sellAmount: op.sellAmount ? BigInt(op.sellAmount) : undefined,
+                    options: {
+                        slippageBasisPoints: op.options?.slippageBasisPoints || 1000
+                    }
+                };
+            });
+
+            // 常量定义
+            const FEE_CONSTANTS = {
+                // 基础交易费用
+                TX_BASE_FEE: BigInt(5000),
+                COMPUTE_UNIT_FEE: BigInt(400000) * BigInt(1),
+                TOKEN_ACCOUNT_RENT: BigInt(2039280),
+                SPL_TOKEN_ACCOUNT_RENT: BigInt(2039280),
+
+                // 平台费率
+                BUY_FEE_PERCENTAGE: BigInt(100),  // 买入收1%
+                SELL_FEE_PERCENTAGE: BigInt(100), // 卖出收1%
+
+                // 其他费用
+                PRIORITY_FEE_BASE: BigInt(1000)
+            };
+
+            // 初始化配置
+            const config = {
+                bundleMaxSize: options.bundleMaxSize || 5,
+                waitBetweenBundles: options.waitBetweenBundles || 80,
+                retryAttempts: options.retryAttempts || 3,
+                skipPreflight: options.skipPreflight || false,
+                preflightCommitment: options.preflightCommitment || 'confirmed',
+                timeout: options.timeout || 60000,
+                usePriorityFee: options.usePriorityFee !== undefined ? options.usePriorityFee : true,
+                normalSubmission: options.normalSubmission !== undefined ? options.normalSubmission : false,
+                jitoTipSol: options.jitoTipSol || 0.0001,
+                jitoTipRequired: options.jitoTipRequired !== undefined ? options.jitoTipRequired : true
+            };
+
+            // 初始化Jito服务(如果需要)
             if (!config.normalSubmission) {
                 jitoService = new JitoService(this.connection);
                 await jitoService.initialize();
-                this.jitoService = jitoService;
             }
 
-            // 3. 使用 batchCheckBalances 批量获取余额
-            const walletInfos = operations.map(op => ({
-                wallet: op.wallet,
-                mint: op.mint instanceof PublicKey ? op.mint : new PublicKey(op.mint),
-                accountNumber: op.accountNumber
-            }));
+            // 获取最新区块哈希
+            const { blockhash, lastValidBlockHeight } =
+                await this.connection.getLatestBlockhash('confirmed');
 
-            const balanceResults = await this.batchCheckBalances(walletInfos, config);
+            // 计算费用的函数
+            const calculateFees = async (op) => {
+                // 检查代币账户
+                const [hasTokenAccount, rentExemptLamports] = await Promise.all([
+                    this.checkTokenAccount(op.wallet.publicKey, op.mint),
+                    this.connection.getMinimumBalanceForRentExemption(TokenAccountLayout.span)
+                ]);
 
-            // 4. 准备交易，使用节流和批处理
-            const transactions = [];
-            const skippedOperations = [];
+                // 基础费用结构
+                const baseFees = {
+                    baseFee: FEE_CONSTANTS.TX_BASE_FEE,
+                    computeUnitFee: FEE_CONSTANTS.COMPUTE_UNIT_FEE,
+                    tokenAccountFee: hasTokenAccount ? BigInt(0) : BigInt(rentExemptLamports),
+                    ataCreationFee: hasTokenAccount ? BigInt(0) : FEE_CONSTANTS.TOKEN_ACCOUNT_RENT,
+                    priorityFee: config.usePriorityFee ?
+                        BigInt(Math.floor(config.jitoTipSol * LAMPORTS_PER_SOL)) : BigInt(0),
+                    buffer: BigInt(1000000)
+                };
 
-            for (let i = 0; i < balanceResults.length; i++) {
-                const result = balanceResults[i];
-                const op = operations[i];
+                // 买入相关费用
+                const buyFees = op.buyAmountLamports ? {
+                    buyAmount: op.buyAmountLamports,
+                    buyPlatformFee: op.buyAmountLamports / FEE_CONSTANTS.BUY_FEE_PERCENTAGE,
+                    buySlippage: (op.buyAmountLamports * BigInt(op.options?.slippageBasisPoints || 1000)) / BigInt(10000)
+                } : {
+                    buyAmount: BigInt(0),
+                    buyPlatformFee: BigInt(0),
+                    buySlippage: BigInt(0)
+                };
 
-                if (!result.success) {
-                    skippedOperations.push({
-                        wallet: op.wallet.publicKey.toString(),
-                        error: result.error,
-                        type: 'BALANCE_CHECK_FAILED'
-                    });
-                    continue;
-                }
+                // 卖出相关费用
+                const sellFees = op.sellAmount ? {
+                    sellAmount: BigInt(op.sellAmount),
+                    sellPlatformFee: BigInt(op.sellAmount) / FEE_CONSTANTS.SELL_FEE_PERCENTAGE,
+                    sellSlippage: (BigInt(op.sellAmount) * BigInt(op.options?.slippageBasisPoints || 1000)) / BigInt(10000)
+                } : {
+                    sellAmount: BigInt(0),
+                    sellPlatformFee: BigInt(0),
+                    sellSlippage: BigInt(0)
+                };
 
-                // 使用限流方式处理交易准备
+                // 合并所有费用
+                const fees = {
+                    ...baseFees,
+                    ...buyFees,
+                    ...sellFees
+                };
+
+                // 计算总费用
+                const totalFees = Object.values(fees).reduce(
+                    (sum, fee) => sum + fee,
+                    BigInt(0)
+                );
+
+                return {
+                    fees,
+                    totalFees,
+                    needsTokenAccount: !hasTokenAccount
+                };
+            };
+
+            // 处理每个操作的费用
+            for (const op of normalizedOperations) {
                 try {
-                    // 计算买入金额 (使用传入的 amountSol)
-                    if (!op.amountSol || isNaN(parseFloat(op.amountSol))) {
-                        skippedOperations.push({
+                    // 计算费用
+                    const { fees, totalFees, needsTokenAccount } = await calculateFees(op);
+
+                    // 计算所需总金额
+                    const totalRequired = (op.buyAmountLamports || BigInt(0)) + totalFees;
+
+                    // 检查钱包余额
+                    const balance = await this.connection.getBalance(op.wallet.publicKey);
+
+                    if (BigInt(balance) < totalRequired) {
+                        const shortfall = totalRequired - BigInt(balance);
+
+                        logger.warn('余额不足:', {
                             wallet: op.wallet.publicKey.toString(),
-                            error: 'Invalid amount',
-                            type: 'INVALID_AMOUNT'
+                            required: {
+                                total: totalRequired.toString(),
+                                buyAmount: op.buyAmountLamports?.toString() || '0',
+                                sellAmount: op.sellAmount?.toString() || '0',
+                                fees: {
+                                    ...Object.fromEntries(
+                                        Object.entries(fees).map(([k, v]) => [k, v.toString()])
+                                    ),
+                                    total: totalFees.toString()
+                                }
+                            },
+                            balance: balance.toString(),
+                            shortfall: shortfall.toString()
+                        });
+
+                        results.push({
+                            success: false,
+                            wallet: op.wallet.publicKey.toString(),
+                            error: 'Insufficient balance',
+                            details: {
+                                required: totalRequired.toString(),
+                                balance: balance.toString(),
+                                shortfall: shortfall.toString(),
+                                fees: Object.fromEntries(
+                                    Object.entries(fees).map(([k, v]) => [k, v.toString()])
+                                )
+                            }
                         });
                         continue;
                     }
 
-                    // 构建交易
-                    const transaction = new Transaction();
+                    // 添加费用信息到操作对象
+                    op.fees = fees;
+                    op.totalRequired = totalRequired;
+                    op.needsTokenAccount = needsTokenAccount;
+
+                } catch (error) {
+                    logger.error('计算费用失败:', {
+                        error: error.message,
+                        wallet: op.wallet.publicKey.toString()
+                    });
+                    results.push({
+                        success: false,
+                        wallet: op.wallet.publicKey.toString(),
+                        error: `Fee calculation failed: ${error.message}`
+                    });
+                }
+            }
+
+            // 过滤出余额充足的操作
+            const validOperations = normalizedOperations.filter(op => op.totalRequired);
+
+            if (validOperations.length === 0) {
+                return {
+                    success: false,
+                    results,
+                    stats: {
+                        totalOperations: operations.length,
+                        successful: 0,
+                        failed: operations.length,
+                        reason: 'No valid operations after fee checks'
+                    }
+                };
+            }
+
+            // 处理交易
+            const transactions = [];
+
+            for (const op of validOperations) {
+                try {
+                    // Log the operation being processed
+                    logger.info('开始处理操作:', {
+                        wallet: op.wallet.publicKey.toString(),
+                        mint: typeof op.mint === 'string' ? op.mint : op.mint.toBase58(),
+                        buyAmountLamports: op.buyAmountLamports
+                    });
+
+                    let transaction = new Transaction();
 
                     // 添加计算预算指令
                     transaction.add(
@@ -5334,95 +5477,394 @@ export class CustomPumpSDK extends PumpFunSDK {
                         })
                     );
 
-                    // 获取全局账户
-                    const globalAccount = await this.throttledRequest(() => this.getGlobalAccount());
+                    // 确保 mint 是有效的 PublicKey
+                    const mintPublicKey = op.mint instanceof PublicKey ?
+                        op.mint : new PublicKey(op.mint);
 
-                    // 准备交易
-                    transactions.push({
-                        wallet: op.wallet,
-                        mint: result.wallet.mint,
-                        transaction,
-                        amountSol: op.amountSol,
-                        sellPercentage: op.sellPercentage || 100,
-                        accountNumber: op.accountNumber,
-                        balance: result.balance,
-                        tokenBalance: result.tokenBalance,
-                        globalAccount
+                    // 检查 buyAmountLamports 是否存在
+
+                    if (op.buyAmountLamports === undefined || op.buyAmountLamports === null) {
+                        throw new Error(`操作中未定义买入金额 (buyAmountLamports): ${op.wallet.publicKey.toBase58()}`);
+                    }
+
+                    // 将 lamports 转换为 BigInt，并确保此过程不会出错
+                    let buyAmountLamportsBigInt;
+                    try {
+                        buyAmountLamportsBigInt = BigInt(op.buyAmountLamports);
+                        logger.info("买入金额转换为BigInt:", {
+                            original: op.buyAmountLamports,
+                            bigint: buyAmountLamportsBigInt.toString()
+                        });
+                    } catch (error) {
+                        throw new Error(`无法将买入金额转换为BigInt: ${error.message}, 原始值: ${op.buyAmountLamports}`);
+                    }
+
+                    // 获取绑定曲线账户，并确保其存在
+                    const bondingCurveAccount = await this.getBondingCurveAccount(mintPublicKey);
+                    if (!bondingCurveAccount) {
+                        throw new Error(`找不到绑定曲线账户: ${mintPublicKey.toBase58()}`);
+                    }
+
+                    // 检查绑定曲线账户是否具有必要的方法
+                    if (typeof bondingCurveAccount.getBuyPrice !== 'function') {
+                        throw new Error(`绑定曲线账户缺少getBuyPrice方法: ${mintPublicKey.toBase58()}`);
+                    }
+
+                    // 获取全局账户
+                    const globalAccount = await this.getGlobalAccount();
+                    if (!globalAccount) {
+                        throw new Error('无法获取全局账户');
+                    }
+                    logger.info("获取到全局账户:", {
+                        feeRecipient: globalAccount.feeRecipient ? globalAccount.feeRecipient.toBase58() : 'undefined',
+                        feeBasisPoints: globalAccount.feeBasisPoints
                     });
+
+                    // 计算代币购买价格
+                    let tokenAmountToBuy;
+                    try {
+                        tokenAmountToBuy = bondingCurveAccount.getBuyPrice(buyAmountLamportsBigInt);
+                        if (!tokenAmountToBuy) {
+                            throw new Error('getBuyPrice返回undefined或null');
+                        }
+                        logger.info("计算代币购买数量:", {
+                            tokenAmountToBuy: tokenAmountToBuy.toString()
+                        });
+                    } catch (error) {
+                        throw new Error(`计算代币购买价格失败: ${error.message}`);
+                    }
+
+                    // 计算包含滑点的买入价格
+                    let buyAmountWithSlippage;
+                    try {
+                        // 确保滑点参数有效
+                        const slippageBasisPoints = op.options?.slippageBasisPoints !== undefined ?
+                            BigInt(op.options.slippageBasisPoints) : BigInt(1000);
+
+                        logger.info("滑点参数:", {
+                            slippageBasisPoints: slippageBasisPoints.toString()
+                        });
+
+                        buyAmountWithSlippage = await this.calculateWithSlippageBuy(
+                            tokenAmountToBuy,
+                            slippageBasisPoints
+                        );
+
+                        if (!buyAmountWithSlippage) {
+                            throw new Error('计算滑点买入价格返回undefined或null');
+                        }
+
+                        logger.info("计算滑点后买入价格:", {
+                            buyAmountWithSlippage: buyAmountWithSlippage.toString()
+                        });
+                    } catch (error) {
+                        throw new Error(`计算滑点买入价格失败: ${error.message}`);
+                    }
+
+                    // 生成买入指令
+                    try {
+                        const buyIx = await this.getBuyInstructions(
+                            op.wallet.publicKey,
+                            mintPublicKey,
+                            globalAccount.feeRecipient,
+                            tokenAmountToBuy,
+                            buyAmountWithSlippage
+                        );
+                        transaction.add(buyIx);
+                        logger.info("添加买入指令成功");
+                    } catch (error) {
+                        throw new Error(`生成买入指令失败: ${error.message}`);
+                    }
+
+                    // 计算卖出相关的值
+                    let expectedSolReturn, sellAmountWithSlippage;
+                    try {
+                        // 检查getSellPrice方法是否存在
+                        if (typeof bondingCurveAccount.getSellPrice !== 'function') {
+                            throw new Error('绑定曲线账户缺少getSellPrice方法');
+                        }
+
+                        // 检查feeBasisPoints是否有效
+                        if (globalAccount.feeBasisPoints === undefined || globalAccount.feeBasisPoints === null) {
+                            throw new Error('全局账户的feeBasisPoints未定义');
+                        }
+
+                        expectedSolReturn = bondingCurveAccount.getSellPrice(tokenAmountToBuy, globalAccount.feeBasisPoints);
+
+                        if (!expectedSolReturn) {
+                            throw new Error('getSellPrice返回undefined或null');
+                        }
+
+                        logger.info("预期SOL返回金额:", {
+                            expectedSolReturn: expectedSolReturn.toString()
+                        });
+
+                        // 确保滑点参数有效
+                        const slippageBasisPoints = op.options?.slippageBasisPoints !== undefined ?
+                            BigInt(op.options.slippageBasisPoints) : BigInt(1000);
+
+                        sellAmountWithSlippage = this.calculateWithSlippageSell(
+                            expectedSolReturn,
+                            slippageBasisPoints
+                        );
+
+                        if (!sellAmountWithSlippage) {
+                            throw new Error('计算滑点卖出价格返回undefined或null');
+                        }
+
+                        logger.info("计算滑点后卖出价格:", {
+                            sellAmountWithSlippage: sellAmountWithSlippage.toString()
+                        });
+                    } catch (error) {
+                        throw new Error(`计算卖出相关值失败: ${error.message}`);
+                    }
+
+                    // 生成卖出指令
+                    try {
+                        const sellIx = await this.getSellInstructions(
+                            op.wallet.publicKey,
+                            mintPublicKey,
+                            globalAccount.feeRecipient,
+                            tokenAmountToBuy,
+                            sellAmountWithSlippage
+                        );
+                        transaction.add(sellIx);
+                        logger.info("添加卖出指令成功");
+                    } catch (error) {
+                        throw new Error(`生成卖出指令失败: ${error.message}`);
+                    }
+
+                    // 设置交易参数
+                    try {
+                        // 检查blockhash和lastValidBlockHeight是否已定义
+                        if (!blockhash) {
+                            throw new Error('blockhash未定义');
+                        }
+
+                        if (lastValidBlockHeight === undefined || lastValidBlockHeight === null) {
+                            throw new Error('lastValidBlockHeight未定义');
+                        }
+
+                        transaction.recentBlockhash = blockhash;
+                        transaction.feePayer = op.wallet.publicKey;
+                        transaction.lastValidBlockHeight = lastValidBlockHeight;
+
+                        logger.info("设置交易参数成功:", {
+                            blockhash: blockhash,
+                            feePayer: op.wallet.publicKey.toString(),
+                            lastValidBlockHeight: lastValidBlockHeight
+                        });
+                    } catch (error) {
+                        throw new Error(`设置交易参数失败: ${error.message}`);
+                    }
+
+                    // 模拟交易
+                    try {
+                        const simulationResult = await this.connection.simulateTransaction(transaction);
+
+                        if (simulationResult.value.err) {
+                            throw new Error(`交易模拟失败: ${JSON.stringify(simulationResult.value.err)}`);
+                        }
+
+                        // 记录模拟结果
+                        logger.info('交易模拟成功:', {
+                            wallet: op.wallet.publicKey.toString(),
+                            logs: simulationResult.value.logs?.slice(0, 5) // 只记录前5条日志
+                        });
+
+                        // 添加到交易列表
+                        transactions.push({
+                            transaction,
+                            operation: op,
+                            simulationResult: simulationResult.value
+                        });
+                    } catch (error) {
+                        throw new Error(`交易模拟失败: ${error.message}`);
+                    }
                 } catch (error) {
-                    skippedOperations.push({
-                        wallet: op.wallet.publicKey.toString(),
+                    logger.error('构建交易失败:', {
                         error: error.message,
-                        type: 'PREPARATION_FAILED'
+                        stack: error.stack,
+                        wallet: op.wallet.publicKey.toString(),
+                        operation: {
+                            mint: op.mint instanceof PublicKey ? op.mint.toBase58() : op.mint,
+                            buyAmountLamports: op.buyAmountLamports,
+                            options: op.options
+                        }
+                    });
+                    // 将失败的操作添加到一个单独的数组中，以便后续处理
+                    failedOperations.push({
+                        operation: op,
+                        error: error.message
                     });
                 }
             }
 
-            // 5. 批量模拟交易
-            const simulationResults = await this.batchSimulateTransactions(transactions, config);
-
-            // 6. 过滤出成功的交易
-            const validTransactions = simulationResults.filter(tx => tx.success);
-            const failedSimulations = simulationResults.filter(tx => !tx.success);
-
-            // 添加模拟失败的到跳过列表
-            for (const failed of failedSimulations) {
-                skippedOperations.push({
-                    wallet: failed.wallet.publicKey.toString(),
-                    error: failed.error || 'Simulation failed',
-                    type: 'SIMULATION_FAILED'
-                });
+            // 分批处理交易
+            const batches = [];
+            for (let i = 0; i < transactions.length; i += config.bundleMaxSize) {
+                batches.push(transactions.slice(i, i + config.bundleMaxSize));
             }
 
-            // 7. 批量发送和确认交易
-            const results = [];
+            // 处理每个批次
+            for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+                const batch = batches[batchIndex];
 
-            if (validTransactions.length > 0) {
-                const sendResults = await this.sendAndConfirmBatchTransactions(validTransactions, config);
-                results.push(...sendResults);
+                try {
+                    if (config.normalSubmission) {
+                        // 普通提交
+                        for (const { transaction, operation } of batch) {
+                            transaction.sign(operation.wallet);
+                            const signature = await this.connection.sendTransaction(
+                                transaction,
+                                [operation.wallet],
+                                {
+                                    skipPreflight: config.skipPreflight,
+                                    preflightCommitment: config.preflightCommitment,
+                                    maxRetries: config.retryAttempts
+                                }
+                            );
+                            await this.connection.confirmTransaction({
+                                signature,
+                                blockhash,
+                                lastValidBlockHeight
+                            });
+
+                            results.push({
+                                success: true,
+                                signature,
+                                wallet: operation.wallet.publicKey.toString(),
+                                timestamp: new Date().toISOString()
+                            });
+
+                            // 在每个交易之间添加等待时间
+                            if (batchIndex < batch.length - 1) {
+                                await new Promise(resolve =>
+                                    setTimeout(resolve, config.waitBetweenBundles)
+                                );
+                            }
+                        }
+                    } else {
+                        // Jito优先上链
+                        const batchTxs = batch.map(({ transaction, operation }) => {
+                            transaction.sign(operation.wallet);
+                            return transaction;
+                        });
+
+                        // 为第一笔交易添加Jito小费
+                        if (config.jitoTipRequired && batchTxs.length > 0) {
+                            try {
+                                const tipAmountSol = config.jitoTipSol;
+                                const wallet = batch[0].operation.wallet;  // 获取第一个交易对应的钱包
+
+                                logger.info('准备添加Jito小费:', {
+                                    tipAmountSol,
+                                    wallet: wallet.publicKey.toString()
+                                });
+
+                                batchTxs[0] = await jitoService.addTipToTransaction(
+                                    batchTxs[0],
+                                    {
+                                        tipAmountSol,  // 使用tipAmountSol而不是tipAmount
+                                        wallet         // 明确传递钱包参数
+                                    }
+                                );
+
+                                logger.info('已添加Jito小费并签名成功');
+                            } catch (error) {
+                                logger.error('添加Jito小费失败:', {
+                                    error: error.message,
+                                    stack: error.stack
+                                });
+
+                                // 错误处理：如果添加小费失败，可以考虑改用普通提交
+                                config.normalSubmission = true;
+                                logger.info('因小费添加失败，切换到普通提交模式');
+                            }
+                        }
+
+                        // 发送bundle
+                        const bundleResult = await jitoService.sendBundle(batchTxs);
+
+                        // 等待确认
+                        for (let i = 0; i < batch.length; i++) {
+                            const { operation } = batch[i];
+                            const signature = bs58.encode(batchTxs[i].signatures[0].signature);
+
+                            try {
+                                await this.connection.confirmTransaction({
+                                    signature,
+                                    blockhash,
+                                    lastValidBlockHeight
+                                });
+
+                                results.push({
+                                    success: true,
+                                    signature,
+                                    bundleId: bundleResult.bundleId,
+                                    wallet: operation.wallet.publicKey.toString(),
+                                    timestamp: new Date().toISOString()
+                                });
+                            } catch (error) {
+                                logger.error('操作失败BBBB:', {
+                                    error: error.message,
+                                    stack: error.stack
+                                });
+                                results.push({
+                                    success: false,
+                                    wallet: operation.wallet.publicKey.toString(),
+                                    error: error.message,
+                                    timestamp: new Date().toISOString()
+                                });
+                            }
+
+                            // 在每个交易确认后添加等待时间
+                            if (i < batch.length - 1) {
+                                await new Promise(resolve =>
+                                    setTimeout(resolve, config.waitBetweenBundles)
+                                );
+                            }
+                        }
+                    }
+
+                    // 批次间等待
+                    if (batchIndex < batches.length - 1) {
+                        await new Promise(resolve =>
+                            setTimeout(resolve, config.waitBetweenBundles)
+                        );
+                    }
+
+                } catch (error) {
+                    logger.error('操作失败AAAA:', {
+                        error: error.message,
+                        stack: error.stack
+                    });
+                    batch.forEach(({ operation }) => {
+                        results.push({
+                            success: false,
+                            wallet: operation.wallet.publicKey.toString(),
+                            error: error.message,
+                            timestamp: new Date().toISOString()
+                        });
+                    });
+                }
             }
-
-            // 添加跳过的操作结果
-            for (const skipped of skippedOperations) {
-                results.push({
-                    success: false,
-                    wallet: skipped.wallet,
-                    error: skipped.error,
-                    errorType: skipped.type,
-                    timestamp: new Date().toISOString()
-                });
-            }
-
-            // 8. 返回结果和统计信息
-            const successfulTransactions = results.filter(r => r.success);
-            const failedTransactions = results.filter(r => !r.success);
-
-            const summary = {
-                totalOperations: operations.length,
-                successful: successfulTransactions.length,
-                failed: failedTransactions.length,
-                skipped: skippedOperations.length,
-                totalBuyAmount: successfulTransactions.reduce((sum, tx) => sum + parseFloat(tx.amountSol || 0), 0),
-                totalSoldAmount: successfulTransactions.reduce((sum, tx) => sum + parseFloat(tx.soldAmount || 0), 0),
-                totalSolReceived: successfulTransactions.reduce((sum, tx) => sum + parseFloat(tx.solReceived || 0), 0)
-            };
 
             return {
-                success: successfulTransactions.length > 0,
+                success: results.some(r => r.success),
                 results,
-                summary,
-                timing: {
-                    startTime: new Date(startTime).toISOString(),
-                    endTime: new Date().toISOString(),
-                    duration: `${((Date.now() - startTime) / 1000).toFixed(2)}s`
+                stats: {
+                    totalOperations: operations.length,
+                    successful: results.filter(r => r.success).length,
+                    failed: results.filter(r => !r.success).length,
+                    duration: `${(Date.now() - startTime) / 1000} seconds`
                 }
             };
 
         } catch (error) {
             logger.error('批量操作失败:', {
                 error: error.message,
-                stack: error.stack,
-                duration: `${(Date.now() - startTime) / 1000} seconds`
+                stack: error.stack
             });
             throw error;
         } finally {
@@ -6822,342 +7264,6 @@ export class CustomPumpSDK extends PumpFunSDK {
                         stack: cleanupError.stack
                     });
                 }
-            }
-        }
-    }
-
-    /**
-     * 批量发送和确认交易，避免频繁 RPC 调用
-     * @param {Array} transactions - 交易对象数组
-     * @param {Object} config - 配置选项
-     * @returns {Promise<Array>} - 交易结果数组
-     */
-    async sendAndConfirmBatchTransactions(transactions, config) {
-        const results = [];
-
-        // 分批处理交易发送
-        for (let i = 0; i < transactions.length; i += config.bundleMaxSize) {
-            const batch = transactions.slice(i, i + config.bundleMaxSize);
-            logger.info(`发送交易批次 ${Math.floor(i / config.bundleMaxSize) + 1}/${Math.ceil(transactions.length / config.bundleMaxSize)}`);
-
-            // 获取最新区块哈希
-            const { blockhash, lastValidBlockHeight } = await this.throttledRequest(() =>
-                this.connection.getLatestBlockhash('confirmed')
-            );
-
-            // 准备交易
-            for (const tx of batch) {
-                tx.transaction.recentBlockhash = blockhash;
-                tx.transaction.feePayer = tx.wallet.publicKey;
-                tx.transaction.lastValidBlockHeight = lastValidBlockHeight;
-                tx.transaction.sign(tx.wallet);
-            }
-
-            try {
-                let batchSignatures = [];
-
-                if (config.normalSubmission) {
-                    // 逐个发送交易
-                    for (const tx of batch) {
-                        try {
-                            const signature = await this.throttledRequest(() =>
-                                this.connection.sendRawTransaction(
-                                    tx.transaction.serialize(),
-                                    {
-                                        skipPreflight: config.skipPreflight,
-                                        preflightCommitment: config.preflightCommitment,
-                                        maxRetries: config.retryAttempts
-                                    }
-                                )
-                            );
-
-                            batchSignatures.push({
-                                tx,
-                                signature,
-                                success: true
-                            });
-                        } catch (error) {
-                            batchSignatures.push({
-                                tx,
-                                error: error.message,
-                                success: false
-                            });
-                        }
-
-                        // 交易间短暂等待
-                        await new Promise(resolve => setTimeout(resolve, 200));
-                    }
-                } else {
-                    // 使用 Jito Bundle
-                    const jitoBundle = batch.map(tx => tx.transaction);
-
-                    // 为第一笔交易添加小费
-                    if (config.jitoTipRequired && jitoBundle.length > 0) {
-                        const tipAmountSol = config.jitoTipSol;
-                        const wallet = batch[0].wallet;
-                        jitoBundle[0] = await this.jitoService.addTipToTransaction(
-                            jitoBundle[0],
-                            { tipAmountSol, wallet }
-                        );
-                    }
-
-                    // 发送 Bundle
-                    const bundleResult = await this.jitoService.sendBundle(jitoBundle);
-
-                    // 记录签名
-                    batchSignatures = batch.map((tx, index) => ({
-                        tx,
-                        signature: bs58.encode(jitoBundle[index].signatures[0].signature),
-                        bundleId: bundleResult.bundleId,
-                        success: true
-                    }));
-                }
-
-                // 分批确认交易
-                const MAX_CONCURRENT_CONFIRMS = 5;
-                for (let j = 0; j < batchSignatures.length; j += MAX_CONCURRENT_CONFIRMS) {
-                    const confirmBatch = batchSignatures.slice(j, j + MAX_CONCURRENT_CONFIRMS);
-
-                    await Promise.all(
-                        confirmBatch.map(async (item) => {
-                            if (!item.success) return item;
-
-                            try {
-                                await this.throttledRequest(() =>
-                                        this.connection.confirmTransaction(
-                                            {
-                                                signature: item.signature,
-                                                blockhash,
-                                                lastValidBlockHeight
-                                            },
-                                            'confirmed'
-                                        ),
-                                    { maxRetries: 8 } // 确认阶段增加更多重试
-                                );
-
-                                results.push({
-                                    success: true,
-                                    signature: item.signature,
-                                    bundleId: item.bundleId,
-                                    wallet: item.tx.wallet.publicKey.toString(),
-                                    mint: item.tx.mint.toString(),
-                                    percentage: item.tx.percentage,
-                                    amountSol: item.tx.amountSol,
-                                    timestamp: new Date().toISOString()
-                                });
-                            } catch (error) {
-                                results.push({
-                                    success: false,
-                                    signature: item.signature,
-                                    wallet: item.tx.wallet.publicKey.toString(),
-                                    mint: item.tx.mint.toString(),
-                                    error: error.message,
-                                    timestamp: new Date().toISOString()
-                                });
-                            }
-                        })
-                    );
-
-                    // 确认批次间短暂等待
-                    if (j + MAX_CONCURRENT_CONFIRMS < batchSignatures.length) {
-                        await new Promise(resolve => setTimeout(resolve, 300));
-                    }
-                }
-
-            } catch (batchError) {
-                // 批次级错误处理
-                logger.error(`批次处理失败:`, {
-                    error: batchError.message,
-                    batchIndex: Math.floor(i / config.bundleMaxSize)
-                });
-
-                for (const tx of batch) {
-                    results.push({
-                        success: false,
-                        wallet: tx.wallet.publicKey.toString(),
-                        mint: tx.mint.toString(),
-                        error: batchError.message,
-                        timestamp: new Date().toISOString()
-                    });
-                }
-            }
-
-            // 批次间添加更长的等待时间
-            if (i + config.bundleMaxSize < transactions.length) {
-                const waitTime = Math.max(config.waitBetweenBundles, 1000);
-                logger.info(`等待 ${waitTime}ms 后处理下一批次...`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-            }
-        }
-
-        return results;
-    }
-    /**
-     * 批量模拟交易，避免频繁 RPC 调用
-     * @param {Array} transactions - 交易对象数组
-     * @param {Object} config - 配置选项
-     * @returns {Promise<Array>} - 模拟结果数组
-     */
-    async batchSimulateTransactions(transactions, config) {
-        const results = [];
-
-        // 分批处理
-        for (let i = 0; i < transactions.length; i += config.simulationBatchSize) {
-            const batch = transactions.slice(i, i + config.simulationBatchSize);
-            logger.info(`处理交易模拟批次 ${Math.floor(i / config.simulationBatchSize) + 1}/${Math.ceil(transactions.length / config.simulationBatchSize)}`);
-
-            // 限制并发数量
-            const batchPromises = batch.map(tx =>
-                this.throttledRequest(async () => {
-                    try {
-                        const simulation = await this.connection.simulateTransaction(
-                            tx.transaction,
-                            [tx.wallet],
-                            { commitment: 'processed' }
-                        );
-
-                        return {
-                            ...tx,
-                            simulation,
-                            success: !simulation.value.err,
-                            error: simulation.value.err
-                        };
-                    } catch (error) {
-                        return {
-                            ...tx,
-                            success: false,
-                            error: error.message
-                        };
-                    }
-                })
-            );
-
-            const batchResults = await Promise.all(batchPromises);
-            results.push(...batchResults);
-
-            // 批次间添加等待时间
-            if (i + config.simulationBatchSize < transactions.length) {
-                await new Promise(resolve => setTimeout(resolve, config.simulationBatchDelay));
-            }
-        }
-
-        return results;
-    }
-    /**
-     * 批量检查账户余额，避免频繁 RPC 调用
-     * @param {Array} wallets - 钱包数组
-     * @param {Object} config - 配置选项
-     * @returns {Promise<Array>} - 余额结果数组
-     */
-    async batchCheckBalances(wallets, config) {
-        const results = [];
-
-        // 分批处理
-        for (let i = 0; i < wallets.length; i += config.balanceBatchSize) {
-            const batch = wallets.slice(i, i + config.balanceBatchSize);
-            logger.info(`处理余额查询批次 ${Math.floor(i / config.balanceBatchSize) + 1}/${Math.ceil(wallets.length / config.balanceBatchSize)}`);
-
-            // 并行处理每个批次，但限制并发数
-            const batchPromises = batch.map(wallet =>
-                this.throttledRequest(async () => {
-                    try {
-                        const balance = await this.connection.getBalance(wallet.publicKey);
-
-                        // 获取代币余额
-                        let tokenBalance = '0';
-                        try {
-                            const tokenAccount = await this.findAssociatedTokenAddress(
-                                wallet.publicKey,
-                                new PublicKey(wallet.mint)
-                            );
-                            const tokenAccountInfo = await this.connection.getAccountInfo(tokenAccount);
-
-                            if (tokenAccountInfo) {
-                                const balanceResponse = await this.connection.getTokenAccountBalance(tokenAccount);
-                                tokenBalance = balanceResponse.value.amount;
-                            }
-                        } catch (tokenError) {
-                            logger.debug(`获取代币余额失败: ${tokenError.message}`);
-                        }
-
-                        return {
-                            wallet,
-                            balance,
-                            tokenBalance,
-                            success: true
-                        };
-                    } catch (error) {
-                        return {
-                            wallet,
-                            success: false,
-                            error: error.message
-                        };
-                    }
-                })
-            );
-
-            const batchResults = await Promise.all(batchPromises);
-            results.push(...batchResults);
-
-            // 批次间添加等待时间
-            if (i + config.balanceBatchSize < wallets.length) {
-                await new Promise(resolve => setTimeout(resolve, config.balanceBatchDelay));
-            }
-        }
-
-        return results;
-    }
-    /**
-     * 节流 RPC 请求，避免 429 错误
-     * @param {Function} requestFn - 执行请求的函数
-     * @param {Object} retryOptions - 重试选项
-     * @returns {Promise<any>} - 请求结果
-     */
-    async throttledRequest(requestFn, retryOptions = {}) {
-        const {
-            maxRetries = 5,
-            initialBackoff = 500,
-            maxBackoff = 10000,
-            backoffMultiplier = 1.5,
-            jitterFactor = 0.2
-        } = retryOptions;
-
-        let retryCount = 0;
-        let currentBackoff = initialBackoff;
-
-        while (retryCount <= maxRetries) {
-            try {
-                // 每次请求前添加小延迟，避免突发请求
-                await new Promise(resolve => setTimeout(resolve, 50));
-
-                return await requestFn();
-            } catch (error) {
-                retryCount++;
-
-                // 检查是否是速率限制错误
-                const isRateLimit = error.message.includes('429') ||
-                    error.message.includes('Too Many Requests') ||
-                    error.message.includes('rate limit');
-
-                if (retryCount > maxRetries) {
-                    throw error;
-                }
-
-                // 计算退避时间（带抖动）
-                const jitter = Math.random() * jitterFactor * currentBackoff;
-                const waitTime = isRateLimit ?
-                    Math.min(currentBackoff * 2, maxBackoff) + jitter :
-                    currentBackoff + jitter;
-
-                logger.warn(`RPC 请求失败，等待 ${Math.floor(waitTime)}ms 后重试 (${retryCount}/${maxRetries}):`, {
-                    error: error.message,
-                    isRateLimit
-                });
-
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-
-                // 增加下次退避时间
-                currentBackoff = Math.min(currentBackoff * backoffMultiplier, maxBackoff);
             }
         }
     }
