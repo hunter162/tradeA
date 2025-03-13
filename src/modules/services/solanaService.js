@@ -5490,8 +5490,8 @@ export class SolanaService {
             const jitoTipAmount = jitoTipSol || 0.001; // 如果未提供则默认0.001 SOL
             const totalJitoTip = jitoTipAmount * totalTransactions;
 
-            // 4. 计算优先费用（每笔交易0.000001 SOL）
-            const PRIORITY_FEE = 0.000001;
+            // 4. 计算优先费用（每笔交易0.000006 SOL）
+            const PRIORITY_FEE = 0.000006;
             const totalPriorityFee = PRIORITY_FEE * totalTransactions;
 
             // 5. 计算总买入金额
