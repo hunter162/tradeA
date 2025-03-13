@@ -5276,8 +5276,8 @@ export class CustomPumpSDK extends PumpFunSDK {
             // 常量定义
             const FEE_CONSTANTS = {
                 // 基础交易费用
-                TX_BASE_FEE: BigInt(5000)*2,
-                COMPUTE_UNIT_FEE: BigInt(400000) * BigInt(1),
+                TX_BASE_FEE: BigInt(5000)* BigInt(2),
+                COMPUTE_UNIT_FEE: BigInt(400000) * BigInt(2),
                 TOKEN_ACCOUNT_RENT: BigInt(2039280),
                 SPL_TOKEN_ACCOUNT_RENT: BigInt(2039280),
 
