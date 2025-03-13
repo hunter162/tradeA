@@ -9,7 +9,7 @@ import {
     PublicKey,
     clusterApiUrl,
     Transaction as SolanaTransaction,
-    SystemProgram
+    SystemProgram, Transaction
 } from "@solana/web3.js";
 import {AnchorProvider} from "@coral-xyz/anchor";
 import {Wallet} from "@coral-xyz/anchor";
@@ -27,7 +27,7 @@ import fs from 'fs';
 import {
     getAssociatedTokenAddress,
     TOKEN_PROGRAM_ID,
-    ASSOCIATED_TOKEN_PROGRAM_ID
+    ASSOCIATED_TOKEN_PROGRAM_ID, createTransferInstruction, createAssociatedTokenAccountInstruction
 } from "@solana/spl-token";
 import bs58 from 'bs58';
 import {SOLANA_CONFIG} from '../../config/solana.js';
@@ -5917,6 +5917,752 @@ export class SolanaService {
                 accountRange,
                 percentage,
                 options
+            });
+            throw error;
+        }
+    }
+    // 1. 实现直接转账（1对1）
+    async directTransfer({
+                             fromGroup,
+                             fromAccount,
+                             toGroup,
+                             toAccount,
+                             amount,
+                             mintAddress,
+                             isToken = false,
+                             options = {}
+                         }) {
+        try {
+            logger.info('开始1对1转账:', {
+                fromGroup,
+                fromAccount,
+                toGroup,
+                toAccount,
+                amount,
+                isToken,
+                mintAddress
+            });
+
+            // 1. 获取钱包
+            const fromWallet = await this.walletService.getWalletKeypair(fromGroup, fromAccount);
+            const toWallet = await this.walletService.getWalletKeypair(toGroup, toAccount);
+
+            if (!fromWallet || !toWallet) {
+                throw new Error('无法获取钱包');
+            }
+
+            if (isToken) {
+                // 代币转账
+                const mint = new PublicKey(mintAddress);
+
+                // 获取或创建代币账户
+                const fromTokenAccount = await this.findAssociatedTokenAddress(
+                    fromWallet.publicKey,
+                    mint
+                );
+
+                const toTokenAccount = await this.findAssociatedTokenAddress(
+                    toWallet.publicKey,
+                    mint
+                );
+
+                // 创建交易
+                const transaction = new Transaction();
+
+                // 检查接收方代币账户是否存在
+                try {
+                    await this.connection.getTokenAccountBalance(toTokenAccount);
+                } catch (error) {
+                    // 如果不存在，添加创建账户指令
+                    transaction.add(
+                        createAssociatedTokenAccountInstruction(
+                            fromWallet.publicKey,
+                            toTokenAccount,
+                            toWallet.publicKey,
+                            mint
+                        )
+                    );
+                }
+
+                // 添加转账指令
+                transaction.add(
+                    createTransferInstruction(
+                        fromTokenAccount,
+                        toTokenAccount,
+                        fromWallet.publicKey,
+                        BigInt(amount)
+                    )
+                );
+
+                // 发送交易
+                const signature = await this.sendTransaction(transaction, fromWallet, options);
+
+                // 更新缓存
+                await this.updateAccountBalances(fromWallet, mint, null, null);
+                await this.updateAccountBalances(toWallet, mint, null, null);
+
+                return {
+                    success: true,
+                    signature,
+                    from: fromWallet.publicKey.toString(),
+                    to: toWallet.publicKey.toString(),
+                    amount: amount.toString()
+                };
+            }
+        } catch (error) {
+            logger.error('1对1转账失败:', {
+                error: error.message,
+                fromGroup,
+                fromAccount,
+                toGroup,
+                toAccount
+            });
+            throw error;
+        }
+    }
+
+// 2. 实现1对多转账
+    async oneToManyTransfer({
+                                fromGroup,
+                                fromAccount,
+                                toGroup,
+                                toAccounts,
+                                amount,
+                                mintAddress,
+                                isToken = false,
+                                options = {}
+                            }) {
+        try {
+            logger.info('开始1对多转账:', {
+                fromGroup,
+                fromAccount,
+                toGroup,
+                toAccounts,
+                amount,
+                isToken,
+                mintAddress
+            });
+
+            // 获取源钱包
+            const fromWallet = await this.walletService.getWalletKeypair(fromGroup, fromAccount);
+            if (!fromWallet) {
+                throw new Error(`源钱包不存在: ${fromGroup}-${fromAccount}`);
+            }
+
+            // 获取所有目标钱包
+            const toWallets = await Promise.all(
+                toAccounts.map(async (accountNum) => {
+                    const wallet = await this.walletService.getWalletKeypair(toGroup, accountNum);
+                    if (!wallet) {
+                        throw new Error(`目标钱包不存在: ${toGroup}-${accountNum}`);
+                    }
+                    return {
+                        accountNumber: accountNum,
+                        wallet
+                    };
+                })
+            );
+
+            const results = [];
+            const batchSize = options.batchSize || 5;
+            const delay = options.delayBetweenBatches || 1000;
+
+            if (isToken) {
+                const mint = new PublicKey(mintAddress);
+                const fromTokenAccount = await this.findAssociatedTokenAddress(
+                    fromWallet.publicKey,
+                    mint
+                );
+
+                // 批量处理转账
+                for (let i = 0; i < toWallets.length; i += batchSize) {
+                    const batch = toWallets.slice(i, i + batchSize);
+
+                    for (const {wallet: toWallet, accountNumber} of batch) {
+                        try {
+                            const toTokenAccount = await this.findAssociatedTokenAddress(
+                                toWallet.publicKey,
+                                mint
+                            );
+
+                            const transaction = new Transaction();
+
+                            // 检查并创建接收方代币账户
+                            try {
+                                await this.connection.getTokenAccountBalance(toTokenAccount);
+                            } catch (error) {
+                                transaction.add(
+                                    createAssociatedTokenAccountInstruction(
+                                        fromWallet.publicKey,
+                                        toTokenAccount,
+                                        toWallet.publicKey,
+                                        mint
+                                    )
+                                );
+                            }
+
+                            // 添加转账指令
+                            transaction.add(
+                                createTransferInstruction(
+                                    fromTokenAccount,
+                                    toTokenAccount,
+                                    fromWallet.publicKey,
+                                    BigInt(amount)
+                                )
+                            );
+
+                            // 发送交易
+                            const signature = await this.sendTransaction(transaction, fromWallet, options);
+
+                            // 更新缓存
+                            await this.updateAccountBalances(fromWallet, mint, null, null);
+                            await this.updateAccountBalances(toWallet, mint, null, null);
+
+                            results.push({
+                                success: true,
+                                signature,
+                                accountNumber,
+                                from: fromWallet.publicKey.toString(),
+                                to: toWallet.publicKey.toString(),
+                                amount: amount.toString()
+                            });
+
+                        } catch (error) {
+                            results.push({
+                                success: false,
+                                error: error.message,
+                                accountNumber,
+                                from: fromWallet.publicKey.toString(),
+                                to: toWallet.publicKey.toString()
+                            });
+                        }
+                    }
+
+                    // 批次间延迟
+                    if (i + batchSize < toWallets.length) {
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    }
+                }
+            }
+
+            return {
+                success: true,
+                results,
+                summary: {
+                    total: toWallets.length,
+                    successful: results.filter(r => r.success).length,
+                    failed: results.filter(r => !r.success).length
+                }
+            };
+
+        } catch (error) {
+            logger.error('1对多转账失败:', {
+                error: error.message,
+                fromGroup,
+                fromAccount,
+                toGroup,
+                toAccounts
+            });
+            throw error;
+        }
+    }
+
+// 3. 实现多对1转账
+    async manyToOneTransfer({
+                                fromGroup,
+                                fromAccounts,
+                                toGroup,
+                                toAccount,
+                                amount,
+                                mintAddress,
+                                isToken = false,
+                                options = {}
+                            }) {
+        try {
+            logger.info('开始多对1转账:', {
+                fromGroup,
+                fromAccounts,
+                toGroup,
+                toAccount,
+                amount,
+                isToken,
+                mintAddress
+            });
+
+            // 获取目标钱包
+            const toWallet = await this.walletService.getWalletKeypair(toGroup, toAccount);
+            if (!toWallet) {
+                throw new Error(`目标钱包不存在: ${toGroup}-${toAccount}`);
+            }
+
+            // 获取所有源钱包
+            const fromWallets = await Promise.all(
+                fromAccounts.map(async (accountNum) => {
+                    const wallet = await this.walletService.getWalletKeypair(fromGroup, accountNum);
+                    if (!wallet) {
+                        throw new Error(`源钱包不存在: ${fromGroup}-${accountNum}`);
+                    }
+                    return {
+                        accountNumber: accountNum,
+                        wallet
+                    };
+                })
+            );
+
+            const results = [];
+            const batchSize = options.batchSize || 5;
+            const delay = options.delayBetweenBatches || 1000;
+
+            if (isToken) {
+                const mint = new PublicKey(mintAddress);
+                const toTokenAccount = await this.findAssociatedTokenAddress(
+                    toWallet.publicKey,
+                    mint
+                );
+
+                // 确保目标账户存在
+                let toAccountExists = false;
+                try {
+                    await this.connection.getTokenAccountBalance(toTokenAccount);
+                    toAccountExists = true;
+                } catch (error) {
+                    // 目标账户不存在，将在第一笔交易中创建
+                }
+
+                // 批量处理转账
+                for (let i = 0; i < fromWallets.length; i += batchSize) {
+                    const batch = fromWallets.slice(i, i + batchSize);
+
+                    for (const {wallet: fromWallet, accountNumber} of batch) {
+                        try {
+                            const fromTokenAccount = await this.findAssociatedTokenAddress(
+                                fromWallet.publicKey,
+                                mint
+                            );
+
+                            const transaction = new Transaction();
+
+                            // 如果是第一笔交易且目标账户不存在，创建目标账户
+                            if (!toAccountExists) {
+                                transaction.add(
+                                    createAssociatedTokenAccountInstruction(
+                                        fromWallet.publicKey,
+                                        toTokenAccount,
+                                        toWallet.publicKey,
+                                        mint
+                                    )
+                                );
+                                toAccountExists = true;
+                            }
+
+                            // 添加转账指令
+                            transaction.add(
+                                createTransferInstruction(
+                                    fromTokenAccount,
+                                    toTokenAccount,
+                                    fromWallet.publicKey,
+                                    BigInt(amount)
+                                )
+                            );
+
+                            // 发送交易
+                            const signature = await this.sendTransaction(transaction, fromWallet, options);
+
+                            // 更新缓存
+                            await this.updateAccountBalances(fromWallet, mint, null, null);
+                            await this.updateAccountBalances(toWallet, mint, null, null);
+
+                            results.push({
+                                success: true,
+                                signature,
+                                accountNumber,
+                                from: fromWallet.publicKey.toString(),
+                                to: toWallet.publicKey.toString(),
+                                amount: amount.toString()
+                            });
+
+                        } catch (error) {
+                            results.push({
+                                success: false,
+                                error: error.message,
+                                accountNumber,
+                                from: fromWallet.publicKey.toString(),
+                                to: toWallet.publicKey.toString()
+                            });
+                        }
+                    }
+
+                    // 批次间延迟
+                    if (i + batchSize < fromWallets.length) {
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    }
+                }
+            }
+
+            return {
+                success: true,
+                results,
+                summary: {
+                    total: fromWallets.length,
+                    successful: results.filter(r => r.success).length,
+                    failed: results.filter(r => !r.success).length
+                }
+            };
+
+        } catch (error) {
+            logger.error('多对1转账失败:', {
+                error: error.message,
+                fromGroup,
+                fromAccounts,
+                toGroup,
+                toAccount
+            });
+            throw error;
+        }
+    }
+
+// 4. 实现多对多转账
+    async manyToManyTransfer({
+                                 fromGroup,
+                                 fromAccounts,
+                                 toGroup,
+                                 toAccounts,
+                                 amount,
+                                 mintAddress,
+                                 isToken = false,
+                                 options = {}
+                             }) {
+        try {
+            logger.info('开始多对多转账:', {
+                fromGroup,
+                fromAccounts,
+                toGroup,
+                toAccounts,
+                amount,
+                isToken,
+                mintAddress
+            });
+
+            if (fromAccounts.length !== toAccounts.length) {
+                throw new Error('源账户和目标账户数量必须相同');
+            }
+
+            const results = [];
+            const batchSize = options.batchSize || 5;
+            const delay = options.delayBetweenBatches || 1000;
+
+            // 准备所有转账对
+            const transferPairs = [];
+            for (let i = 0; i < fromAccounts.length; i++) {
+                transferPairs.push({
+                    fromAccount: fromAccounts[i],
+                    toAccount: toAccounts[i]
+                });
+            }
+
+            // 批量处理转账
+            for (let i = 0; i < transferPairs.length; i += batchSize) {
+                const batch = transferPairs.slice(i, i + batchSize);
+
+                for (const pair of batch) {
+                    try {
+                        // 使用 directTransfer 执行每对转账
+                        const result = await this.directTransfer({
+                            fromGroup,
+                            fromAccount: pair.fromAccount,
+                            toGroup,
+                            toAccount: pair.toAccount,
+                            amount,
+                            mintAddress,
+                            isToken,
+                            options
+                        });
+
+                        results.push({
+                            ...result,
+                            fromAccount: pair.fromAccount,
+                            toAccount: pair.toAccount
+                        });
+
+                    } catch (error) {
+                        results.push({
+                            success: false,
+                            error: error.message,
+                            fromAccount: pair.fromAccount,
+                            toAccount: pair.toAccount
+                        });
+                    }
+                }
+
+                // 批次间延迟
+                if (i + batchSize < transferPairs.length) {
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+
+            return {
+                success: true,
+                results,
+                summary: {
+                    total: transferPairs.length,
+                    successful: results.filter(r => r.success).length,
+                    failed: results.filter(r => !r.success).length
+                }
+            };
+
+        } catch (error) {
+            logger.error('多对多转账失败:', {
+                error: error.message,
+                fromGroup,
+                fromAccounts,
+                toGroup,
+                toAccounts
+            });
+            throw error;
+        }
+    }
+
+
+    // 辅助函数：解析账号范围
+    parseAccountRange(accountRange) {
+        // 如果输入为空，直接返回错误
+        if (accountRange === undefined || accountRange === null) {
+            throw new Error('账号范围不能为空');
+        }
+
+        try {
+            // 处理数字类型
+            if (typeof accountRange === 'number') {
+                if (isNaN(accountRange)) {
+                    throw new Error('无效的数字账号');
+                }
+                return [accountRange];
+            }
+
+            // 处理字符串类型
+            if (typeof accountRange === 'string') {
+                const trimmed = accountRange.trim();
+                if (!trimmed) {
+                    throw new Error('账号范围不能为空字符串');
+                }
+
+                // 处理逗号分隔的列表
+                if (trimmed.includes(',')) {
+                    const numbers = trimmed.split(',')
+                        .map(num => {
+                            const parsed = parseInt(num.trim(), 10);
+                            if (isNaN(parsed)) {
+                                throw new Error(`无效的账号: ${num}`);
+                            }
+                            return parsed;
+                        })
+                        .filter(num => !isNaN(num));
+
+                    if (numbers.length === 0) {
+                        throw new Error('解析后的账号列表为空');
+                    }
+                    return numbers;
+                }
+
+                // 处理范围格式
+                if (trimmed.includes('-')) {
+                    const [start, end] = trimmed.split('-')
+                        .map(num => {
+                            const parsed = parseInt(num.trim(), 10);
+                            if (isNaN(parsed)) {
+                                throw new Error(`无效的范围边界: ${num}`);
+                            }
+                            return parsed;
+                        });
+
+                    if (start > end) {
+                        throw new Error(`无效的范围: ${start}-${end}`);
+                    }
+
+                    return Array.from(
+                        { length: end - start + 1 },
+                        (_, i) => start + i
+                    );
+                }
+
+                // 处理单个数字字符串
+                const singleNumber = parseInt(trimmed, 10);
+                if (isNaN(singleNumber)) {
+                    throw new Error(`无效的账号: ${trimmed}`);
+                }
+                return [singleNumber];
+            }
+
+            // 处理数组类型
+            if (Array.isArray(accountRange)) {
+                if (accountRange.length === 0) {
+                    throw new Error('账号数组不能为空');
+                }
+
+                const numbers = accountRange.map(num => {
+                    const parsed = parseInt(num, 10);
+                    if (isNaN(parsed)) {
+                        throw new Error(`数组中包含无效账号: ${num}`);
+                    }
+                    return parsed;
+                });
+
+                return numbers;
+            }
+
+            throw new Error(`不支持的账号范围格式: ${typeof accountRange}`);
+        } catch (error) {
+            logger.error('解析账号范围失败:', {
+                accountRange,
+                error: error.message
+            });
+            throw error;
+        }
+    }
+    async batchDirectTransfer({
+                                  fromGroup,
+                                  fromAccounts,
+                                  toGroup,
+                                  toAccounts,
+                                  amount,
+                                  mintAddress,
+                                  isToken = false,
+                                  options = {}
+                              }) {
+        try {
+            // 记录原始输入
+            logger.info('批量转账请求:', {
+                fromGroup,
+                fromAccounts,
+                toGroup,
+                toAccounts,
+                amount,
+                mintAddress,
+                isToken,
+                options
+            });
+
+            // 参数验证
+            const validationErrors = [];
+
+            // 基本参数验证
+            if (!fromGroup) validationErrors.push('fromGroup 为必填项');
+            if (!toGroup) validationErrors.push('toGroup 为必填项');
+            if (!amount) validationErrors.push('amount 为必填项');
+            if (isToken && !mintAddress) validationErrors.push('代币转账需要提供 mintAddress');
+
+            // 账号验证
+            if (!fromAccounts && fromAccounts !== 0) validationErrors.push('fromAccounts 为必填项');
+            if (!toAccounts && toAccounts !== 0) validationErrors.push('toAccounts 为必填项');
+
+            if (validationErrors.length > 0) {
+                throw new Error(validationErrors.join(', '));
+            }
+
+            // 解析转出账号
+            let sourceAccounts;
+            try {
+                const fromNumber = parseInt(fromAccounts, 10);
+                if (isNaN(fromNumber)) {
+                    throw new Error('无效的转出账号');
+                }
+                sourceAccounts = [fromNumber];
+            } catch (error) {
+                throw new Error(`转出账号解析失败: ${error.message}`);
+            }
+
+            // 解析转入账号
+            let targetAccounts;
+            try {
+                if (typeof toAccounts === 'string') {
+                    // 移除空白字符并分割
+                    targetAccounts = toAccounts
+                        .split(/[,，]/)  // 支持中英文逗号
+                        .map(s => s.trim())
+                        .filter(s => s !== '')
+                        .map(s => {
+                            const num = parseInt(s, 10);
+                            if (isNaN(num)) {
+                                throw new Error(`无效的转入账号: ${s}`);
+                            }
+                            return num;
+                        });
+                } else if (typeof toAccounts === 'number') {
+                    targetAccounts = [toAccounts];
+                } else {
+                    throw new Error('转入账号格式错误');
+                }
+
+                if (!targetAccounts.length) {
+                    throw new Error('未找到有效的转入账号');
+                }
+            } catch (error) {
+                throw new Error(`转入账号解析失败: ${error.message}`);
+            }
+
+            // 记录解析结果
+            logger.info('解析后的转账信息:', {
+                fromGroup,
+                sourceAccounts,
+                toGroup,
+                targetAccounts,
+                amount,
+                isToken,
+                mintAddress
+            });
+
+            // 转账选项
+            const transferOptions = {
+                priorityFee: options.priorityFee || false,
+                tipAmountSol: options.tipAmountSol || 0,
+                skipPreflight: options.skipPreflight || false,
+                maxRetries: options.maxRetries || 3,
+                batchSize: options.batchSize || 10,
+                delayBetweenBatches: options.delayBetweenBatches || 1000
+            };
+
+            // 根据转入账号数量决定转账类型
+            let result;
+            if (targetAccounts.length === 1) {
+                // 1对1转账
+                result = await this.directTransfer({
+                    fromGroup,
+                    fromAccount: sourceAccounts[0],
+                    toGroup,
+                    toAccount: targetAccounts[0],
+                    amount,
+                    mintAddress,
+                    isToken,
+                    options: transferOptions
+                });
+            } else {
+                // 1对多转账
+                result = await this.oneToManyTransfer({
+                    fromGroup,
+                    fromAccount: sourceAccounts[0],
+                    toGroup,
+                    toAccounts: targetAccounts,
+                    amount,
+                    mintAddress,
+                    isToken,
+                    options: transferOptions
+                });
+            }
+
+            return result;
+
+        } catch (error) {
+            logger.error('批量转账失败:', {
+                error: error.message,
+                params: {
+                    fromGroup,
+                    fromAccounts,
+                    toGroup,
+                    toAccounts,
+                    amount,
+                    mintAddress,
+                    isToken
+                }
             });
             throw error;
         }

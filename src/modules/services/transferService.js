@@ -104,7 +104,60 @@ export class TransferService {
             throw error;
         }
     }
+    async getTokenTransactions(mintAddress, options = {}) {
+        try {
+            const { limit = 20, before, after } = options;
 
+            const signatures = await this.connection.getSignaturesForAddress(
+                new PublicKey(mintAddress),
+                {
+                    limit,
+                    before: before ? new TransactionSignature(before) : undefined,
+                    until: after ? new TransactionSignature(after) : undefined
+                }
+            );
+
+            const transactions = await Promise.all(
+                signatures.map(async (sig) => {
+                    try {
+                        const tx = await this.connection.getParsedTransaction(sig.signature);
+                        return {
+                            signature: sig.signature,
+                            timestamp: sig.blockTime ? new Date(sig.blockTime * 1000) : null,
+                            status: tx?.meta?.err ? 'failed' : 'success',
+                            ...tx
+                        };
+                    } catch (error) {
+                        logger.error(`获取交易详情失败 ${sig.signature}:`, error);
+                        return null;
+                    }
+                })
+            );
+
+            return transactions.filter(Boolean);
+        } catch (error) {
+            logger.error('获取代币交易历史失败:', error);
+            throw error;
+        }
+    }
+    async getTokenInfo(mintAddress) {
+        try {
+            const mintPubkey = new PublicKey(mintAddress);
+            const tokenInfo = await this.connection.getParsedAccountInfo(mintPubkey);
+
+            if (!tokenInfo?.value?.data) {
+                throw new Error('Token not found');
+            }
+
+            return {
+                mintAddress,
+                ...tokenInfo.value.data
+            };
+        } catch (error) {
+            logger.error('获取代币信息失败:', error);
+            throw error;
+        }
+    }
     // 多对多转账
     async manyToMany(fromGroupType, fromAccountRange, toGroupType, toAccountRange, amount = null) {
         try {

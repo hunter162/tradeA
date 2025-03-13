@@ -371,7 +371,12 @@ export function createSolanaRoutes(solanaController) {
             await solanaController.getTransaction(req, res);
         })
     );
-
+    router.get('/tokens/:mintAddress/info',
+        validateRequest,
+        asyncHandler(async (req, res) => {
+            await solanaController.getTokenInfo(req, res);
+        })
+    );
     // 获取代币信息
     router.get('/token/:mintAddress',
         solanaValidators.getToken,
@@ -415,6 +420,13 @@ export function createSolanaRoutes(solanaController) {
         validateRequest,
         async (req, res) => {
             await solanaController.batchBuyAndSell(req, res);
+        }
+    );
+    router.post('/batch-transfer',
+        solanaValidators.batchDirectTransfer,
+        validateRequest,
+        async (req, res) => {
+            await solanaController.batchDirectTransfer(req, res);
         }
     );
     return router;

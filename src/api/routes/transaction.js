@@ -41,6 +41,13 @@ export function createTransactionRoutes(transactionController) {
             await transactionController.getTokenTransactions(req, res);
         })
     );
+    router.get('/token/:mintAddress',
+        transactionValidators.getTokenTransactions,
+        validateRequest,
+        asyncHandler(async (req, res) => {
+            await transactionController.getTokenTransactions(req, res);
+        })
+    );
 
     return router;
 } 

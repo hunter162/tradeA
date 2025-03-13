@@ -49,7 +49,39 @@ export class TransferController {
             });
         }
     }
+    async getTokenTransactions(req, res) {
+        try {
+            const { mintAddress } = req.params;
+            const { limit = 20, before, after } = req.query;
 
+            if (!mintAddress) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Token mint address is required'
+                });
+            }
+
+            const transactions = await this.transferService.getTokenTransactions(
+                mintAddress,
+                {
+                    limit: parseInt(limit),
+                    before,
+                    after
+                }
+            );
+
+            res.json({
+                success: true,
+                data: transactions
+            });
+        } catch (error) {
+            logger.error('获取代币交易历史失败:', error);
+            res.status(400).json({
+                success: false,
+                error: error.message
+            });
+        }
+    }
     // 多对一转账（归集）
     async manyToOne(req, res) {
         try {

@@ -363,5 +363,106 @@ export const solanaValidators = {
             .optional()
             .isObject()
             .withMessage('Options must be an object')
+    ],
+    batchDirectTransfer: [
+        body('fromGroup')
+            .isString()
+            .notEmpty()
+            .withMessage('源组名称是必需的'),
+
+        body('fromAccounts')
+            .custom((value) => {
+                // 验证账号范围格式
+                if (Array.isArray(value)) {
+                    return value.every(num => Number.isInteger(num) && num > 0);
+                }
+                if (typeof value === 'string') {
+                    // 验证范围格式 "1-5"
+                    if (value.includes('-')) {
+                        const [start, end] = value.split('-').map(Number);
+                        return !isNaN(start) && !isNaN(end) && start > 0 && end >= start;
+                    }
+                    // 验证数组格式 "1,2,3"
+                    if (value.includes(',')) {
+                        return value.split(',')
+                            .map(Number)
+                            .every(num => !isNaN(num) && num > 0);
+                    }
+                }
+                return false;
+            })
+            .withMessage('无效的账号范围格式。支持数组[1,2,3]或范围字符串"1-5"或"1,2,3"'),
+
+        body('toGroup')
+            .isString()
+            .notEmpty()
+            .withMessage('目标组名称是必需的'),
+
+        body('toAccounts')
+            .custom((value) => {
+                // 与fromAccounts使用相同的验证逻辑
+                if (Array.isArray(value)) {
+                    return value.every(num => Number.isInteger(num) && num > 0);
+                }
+                if (typeof value === 'string') {
+                    if (value.includes('-')) {
+                        const [start, end] = value.split('-').map(Number);
+                        return !isNaN(start) && !isNaN(end) && start > 0 && end >= start;
+                    }
+                    if (value.includes(',')) {
+                        return value.split(',')
+                            .map(Number)
+                            .every(num => !isNaN(num) && num > 0);
+                    }
+                }
+                return false;
+            })
+            .withMessage('无效的账号范围格式。支持数组[1,2,3]或范围字符串"1-5"或"1,2,3"'),
+
+        body('amount')
+            .custom((value, { req }) => {
+                if (req.body.isToken) {
+                    // Token金额验证
+                    return /^\d+$/.test(value.toString());
+                } else {
+                    // SOL金额验证
+                    return !isNaN(value) && parseFloat(value) > 0;
+                }
+            })
+            .withMessage('无效的转账金额'),
+
+        body('mintAddress')
+            .optional({ nullable: true })
+            .custom((value, { req }) => {
+                if (req.body.isToken && !value) {
+                    throw new Error('Token转账需要提供mint地址');
+                }
+                if (value) {
+                    // 验证Solana公钥格式
+                    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+                }
+                return true;
+            })
+            .withMessage('无效的Token mint地址'),
+
+        body('isToken')
+            .optional()
+            .isBoolean()
+            .withMessage('isToken必须是布尔值'),
+
+        body('options')
+            .optional()
+            .isObject()
+            .withMessage('options必须是对象'),
+
+        body('options.priorityFee')
+            .optional()
+            .isBoolean()
+            .withMessage('priorityFee必须是布尔值'),
+
+        body('options.tipAmountSol')
+            .optional()
+            .isFloat({ min: 0 })
+            .withMessage('tipAmountSol必须是非负数')
     ]
 }; 

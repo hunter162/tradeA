@@ -977,6 +977,116 @@ export class SolanaController {
             });
         }
     }
+    async getTokenInfo(req, res) {
+        try {
+            const { mintAddress } = req.params;
+
+            if (!mintAddress) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Token mint address is required'
+                });
+            }
+
+            const tokenInfo = await this.solanaService.getTokenInfo(mintAddress);
+
+            res.json({
+                success: true,
+                data: tokenInfo
+            });
+        } catch (error) {
+            logger.error('获取代币信息失败:', error);
+            res.status(400).json({
+                success: false,
+                error: error.message
+            });
+        }
+    }
+    JAVASCRIPT
+    async batchDirectTransfer(req, res) {
+        try {
+            const {
+                fromGroup,
+                fromAccounts,
+                toGroup,
+                toAccounts,
+                amount,
+                mintAddress,
+                isToken = false,
+                options = {}
+            } = req.body;
+
+            logger.info('批量转账请求:', {
+                fromGroup,
+                fromAccounts,
+                toGroup,
+                toAccounts,
+                amount,
+                mintAddress,
+                isToken,
+                options
+            });
+
+            // 设置默认选项
+            const transferOptions = {
+                priorityFee: options.priorityFee || false,
+                tipAmountSol: options.tipAmountSol || 0,
+                skipPreflight: options.skipPreflight || false,
+                maxRetries: options.maxRetries || 3,
+                batchSize: options.batchSize || 10,
+                delayBetweenBatches: options.delayBetweenBatches || 1000
+            };
+
+            const result = await this.solanaService.batchDirectTransfer({
+                fromGroup,
+                fromAccounts,
+                toGroup,
+                toAccounts,
+                amount,
+                mintAddress,
+                isToken,
+                options: transferOptions
+            });
+
+            // 构造响应数据
+            const response = {
+                success: true,
+                data: {
+                    summary: {
+                        total: result.summary?.total || 0,
+                        successful: result.summary?.successful || 0,
+                        failed: result.summary?.failed || 0,
+                        skipped: result.summary?.skipped || 0
+                    },
+                    transactions: {
+                        successful: result.results?.filter(tx => tx.success) || [],
+                        failed: result.results?.filter(tx => !tx.success) || []
+                    },
+                    timing: {
+                        startedAt: new Date().toISOString(),
+                        completedAt: new Date().toISOString(),
+                        duration: `${Date.now() - Date.now()}ms`
+                    }
+                }
+            };
+
+            res.json(response);
+
+        } catch (error) {
+            logger.error('批量转账失败:', {
+                error: error.message,
+                params: req.body,
+                stack: error.stack
+            });
+
+            res.status(400).json({
+                success: false,
+                error: error.message,
+                code: error.code || 'BATCH_TRANSFER_FAILED'
+            });
+        }
+    }
+
     async batchSellDirect(req, res) {
         try {
             const {
