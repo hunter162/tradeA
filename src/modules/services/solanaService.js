@@ -5481,7 +5481,7 @@ export class SolanaService {
             const totalCreateAccountFee = CREATE_ACCOUNT_FEE * makersCount;
 
             // 2. 计算基础gas费用（每笔交易0.000005 SOL）
-            const GAS_BASE = 0.000005;
+            const GAS_BASE = 0.000005*2;
             // 交易次数：创建账户 + 转账SOL + 买入代币 + 转回代币 + 关闭账户
             const totalTransactions = makersCount * 5;
             const totalGasFee = GAS_BASE * totalTransactions;
